@@ -3,7 +3,7 @@ Implementation of MoDiff as an anoynous repo for ICML 2025 submission.
 
 ## Checkpoints Downloading
 - Download the corresponding pretrained models in https://ommer-lab.com/files/latent-diffusion, and put them into the corresponding folder in ```models/ldm/*```
-- Download the quantized checkpoints in Q-Diffusion to ```quantized_models```
+- Download the quantized checkpoints in Q-Diffusion in https://drive.google.com/drive/folders/1ImRbmAvzCsU6AOaXbIeI7-4Gu2_Scc-X to ```quantized_models```
 
 ## Reproduce
 To run the experiments with dynamic quantization, please use the following command:
