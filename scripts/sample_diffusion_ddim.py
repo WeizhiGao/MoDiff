@@ -18,7 +18,7 @@ import torchvision.utils as tvu
 
 from qdiff import (
     QuantModel, QuantModule, BaseQuantBlock, 
-    block_reconstruction, layer_reconstruction,
+    block_reconstruction, layer_reconstruction, layer_nobias_reconstruction, block_nobias_reconstruction
 )
 from qdiff.adaptive_rounding import AdaRoundQuantizer
 from qdiff.quant_layer import UniformAffineQuantizer
@@ -117,13 +117,26 @@ class Diffusion(object):
             name = f"lsun_{self.config.data.category}"
         else:
             raise ValueError
-        ckpt = get_ckpt_path(f"ema_{name}", root='models/')
+        ckpt = get_ckpt_path(f"ema_{name}", root='models')
         logger.info("Loading checkpoint {}".format(ckpt))
         model.load_state_dict(torch.load(ckpt, map_location=self.device, weights_only=True))
         
         model.to(self.device)
         model.eval()
         assert(self.args.cond == False)
+
+        if self.args.generate:
+            if self.args.residual:
+                xs, ts, xs_prev, ts_prev = self.generate(model)
+                print(xs.size(), ts.size(), xs_prev.size(), ts_prev.size())
+                generated_data = {"xs":xs, "ts":ts, "xs_prev":xs_prev, "ts_prev":ts_prev}
+            else:
+                xs, ts = self.generate(model)
+                print(xs.size(), ts.size())
+                generated_data = {"xs":xs, "ts":ts}
+            torch.save(generated_data, os.path.join(self.args.logdir, 'cali_data.pt'))
+            exit()
+
         if self.args.ptq:
             if self.args.quant_mode == 'qdiff':
                 wq_params = {'n_bits': args.weight_bit, 'channel_wise': True, 'scale_method': 'max'}
@@ -141,27 +154,42 @@ class Diffusion(object):
                     sm_abit=self.args.sm_abit)
                 qnn.to(self.device)
                 qnn.eval()
+                if self.args.ds and self.args.ckpt_nobias is not None:
+                    qnn_ = create_nobias_model(qnn)
+                    qnn_.to(self.device)
+                    qnn_.eval()
 
                 if self.args.resume:
                     image_size = self.config.data.image_size
                     channels = self.config.data.channels
                     cali_data = (torch.randn(1, channels, image_size, image_size), torch.randint(0, 1000, (1,)))
                     resume_cali_model(qnn, args.cali_ckpt, cali_data, args.quant_act, "qdiff", cond=False, rt=self.args.rt)
-                    # init model_nobias
-                    qnn_ = create_nobias_model(qnn)
-                    qnn_.to(self.device)
-                    qnn_.eval()
+                    if self.args.ds and self.args.ckpt_nobias is None:
+                        qnn_ = create_nobias_model(qnn)
+                        qnn_.to(self.device)
+                        qnn_.eval()
+                    else:
+                        resume_cali_model(qnn_, self.args.ckpt_nobias, cali_data, args.quant_act, "qdiff", cond=False)
                 else:
                     logger.info(f"Sampling data from {self.args.cali_st} timesteps for calibration")
                     sample_data = torch.load(self.args.cali_data_path)
-                    cali_data = get_train_samples(self.args, sample_data, custom_steps=0)
+                    cali_data = get_train_samples(self.args, sample_data, custom_steps=0, with_prev=self.args.ds)
                     del(sample_data)
                     gc.collect()
                     logger.info(f"Calibration data shape: {cali_data[0].shape} {cali_data[1].shape}")
 
-                    cali_xs, cali_ts = cali_data
+                    if args.ds:
+                        cali_xs, cali_ts, cali_xs_prev, cali_ts_prev = cali_data
+                    else:
+                        cali_xs, cali_ts = cali_data
                     if self.args.resume_w:
                         resume_cali_model(qnn, self.args.cali_ckpt, cali_data, False, cond=False)
+                        if self.args.ds:
+                            qnn_ = create_nobias_model(qnn)
+                            qnn_.to(self.device)
+                            qnn_.eval()
+                        if self.args.ckpt_nobias is not None:
+                            resume_cali_model(qnn_, self.args.ckpt_nobias, cali_data, "qdiff", cond=False)
                     else:
                         logger.info("Initializing weight quantization parameters")
                         qnn.set_quant_state(True, False) # enable weight quantization, disable act quantization
@@ -196,63 +224,147 @@ class Diffusion(object):
                             else:
                                 recon_model(module)
 
+                    def recon_model_nobias(model, model_nobias):
+                        for name, module_nobias in model_nobias.named_children():
+                            module = getattr(model, name)
+                            logger.info(f"{name} {isinstance(module_nobias, BaseQuantBlock)}")
+                            if isinstance(module_nobias, QuantModule):
+                                if module_nobias.ignore_reconstruction is True:
+                                    logger.info('Ignore reconstruction of layer {}'.format(name))
+                                    continue
+                                else:
+                                    logger.info('Reconstruction for layer {}'.format(name))
+                                    layer_nobias_reconstruction(qnn, qnn_, module, module_nobias, **kwargs)
+                            elif isinstance(module_nobias, BaseQuantBlock):
+                                if module_nobias.ignore_reconstruction is True:
+                                    logger.info('Ignore reconstruction of block {}'.format(name))
+                                    continue
+                                else:
+                                    logger.info('Reconstruction for block {}'.format(name))
+                                    recon_model_nobias(module, module_nobias)
+                                    # block_nobias_reconstruction(qnn, qnn_, module, module_nobias, **kwargs)
+                            else:
+                                recon_model_nobias(module, module_nobias)
+
                     if not self.args.resume_w:
                         logger.info("Doing weight calibration")
                         recon_model(qnn)
                         qnn.set_quant_state(weight_quant=True, act_quant=False)
+                        qnn_.set_quant_state(weight_quant=True, act_quant=False)
                     if self.args.quant_act:
-                        logger.info("UNet model")
-                        logger.info(model)                    
-                        logger.info("Doing activation calibration")   
-                        # Initialize activation quantization parameters
-                        qnn.set_quant_state(True, True)
-                        with torch.no_grad():
-                            inds = np.random.choice(cali_xs.shape[0], 64, replace=False)
-                            # _ = qnn(cali_xs[:64].cuda(), cali_ts[:64].cuda())
-                            _ = qnn(cali_xs[inds].cuda(), cali_ts[inds].cuda())
-                        
-                            if self.args.running_stat:
-                                logger.info('Running stat for activation quantization')
-                                qnn.set_running_stat(True)
-                                for i in range(int(cali_xs.size(0) / 64)):
-                                    _ = qnn(
-                                        (cali_xs[i * 64:(i + 1) * 64].to(self.device), 
-                                        cali_ts[i * 64:(i + 1) * 64].to(self.device)))
-                                qnn.set_running_stat(False)
-                        
-                        kwargs = dict(
-                            cali_data=cali_data, iters=self.args.cali_iters_a, act_quant=True, 
-                            opt_mode='mse', lr=self.args.cali_lr, p=self.args.cali_p)   
-                        recon_model(qnn)
-                        qnn.set_quant_state(weight_quant=True, act_quant=True)   
+                        # init model_nobias
+                        if self.args.ds:
+                            qnn_ = create_nobias_model(qnn)
+                            qnn_.to(self.device)
+                            qnn_.eval()
+
+                            logger.info("UNet model")
+                            logger.info(model)                    
+                            logger.info("Doing activation calibration on nobias_model")
+                            qnn_.set_quant_state(True, True)
+                            with torch.no_grad():
+                                inds = np.random.choice(cali_xs.shape[0], 64, replace=False)
+                                # _ = qnn(cali_xs[:64].cuda(), cali_ts[:64].cuda())
+                                qnn.set_quant_state(False, True)
+                                qnn.set_use_sd(True)
+                                qnn_.set_use_sd(True)
+                                qnn.set_full_prec(True)
+                                qnn.reset_sd()
+                                qnn_.reset_sd()
+                                qnn(cali_xs_prev[inds].cuda(), cali_ts_prev[inds].cuda())
+                                qnn_.copy_sd(qnn)
+                                _ = qnn_(cali_xs[inds].cuda(), cali_ts[inds].cuda())
+
+                                if self.args.running_stat:
+                                    logger.info('Running stat for activation quantization')
+                                    qnn_.set_running_stat(True)
+                                    for i in range(int(cali_xs.size(0) / 64)):
+                                        _ = qnn_(
+                                            (cali_xs[i * 64:(i + 1) * 64].to(self.device), 
+                                            cali_ts[i * 64:(i + 1) * 64].to(self.device)))
+                                    qnn_.set_running_stat(False)
+                            
+                            kwargs = dict(
+                                cali_data=cali_data, iters=self.args.cali_iters_a, act_quant=True, 
+                                opt_mode='mse', lr=self.args.cali_lr, p=self.args.cali_p)   
+                            recon_model_nobias(qnn, qnn_)
+                            qnn.set_quant_state(weight_quant=True, act_quant=True)
+                            qnn_.set_quant_state(weight_quant=True, act_quant=True)
+                        else:
+                            logger.info("UNet model")
+                            logger.info(model)                    
+                            logger.info("Doing activation calibration")   
+                            # Initialize activation quantization parameters
+                            qnn.set_quant_state(True, True)
+                            with torch.no_grad():
+                                inds = np.random.choice(cali_xs.shape[0], 64, replace=False)
+                                # _ = qnn(cali_xs[:64].cuda(), cali_ts[:64].cuda())
+                                _ = qnn(cali_xs[inds].cuda(), cali_ts[inds].cuda())
+                            
+                                if self.args.running_stat:
+                                    logger.info('Running stat for activation quantization')
+                                    qnn.set_running_stat(True)
+                                    for i in range(int(cali_xs.size(0) / 64)):
+                                        _ = qnn(
+                                            (cali_xs[i * 64:(i + 1) * 64].to(self.device), 
+                                            cali_ts[i * 64:(i + 1) * 64].to(self.device)))
+                                    qnn.set_running_stat(False)
+                            
+                            kwargs = dict(
+                                cali_data=cali_data, iters=self.args.cali_iters_a, act_quant=True, 
+                                opt_mode='mse', lr=self.args.cali_lr, p=self.args.cali_p)   
+                            recon_model(qnn)
+                            qnn.set_quant_state(weight_quant=True, act_quant=True)
 
                     logger.info("Saving calibrated quantized UNet model")
-                    for m in qnn.model.modules():
-                        if isinstance(m, AdaRoundQuantizer):
-                            m.zero_point = nn.Parameter(m.zero_point)
-                            m.delta = nn.Parameter(m.delta)
-                        elif isinstance(m, UniformAffineQuantizer) and self.args.quant_act:
-                            if m.zero_point is not None:
-                                if not torch.is_tensor(m.zero_point):
-                                    m.zero_point = nn.Parameter(torch.tensor(float(m.zero_point)))
-                                else:
-                                    m.zero_point = nn.Parameter(m.zero_point)
-                    torch.save(qnn.state_dict(), os.path.join(self.args.logdir, "ckpt.pth"))
+                    if self.args.ds:
+                        for m in qnn_.model.modules():
+                            if isinstance(m, AdaRoundQuantizer):
+                                m.zero_point = nn.Parameter(m.zero_point)
+                                m.delta = nn.Parameter(m.delta)
+                            elif isinstance(m, UniformAffineQuantizer) and self.args.quant_act:
+                                if m.zero_point is not None:
+                                    if not torch.is_tensor(m.zero_point):
+                                        m.zero_point = nn.Parameter(torch.tensor(float(m.zero_point)))
+                                    else:
+                                        m.zero_point = nn.Parameter(m.zero_point)
+                    else:
+                        for m in qnn.model.modules():
+                            if isinstance(m, AdaRoundQuantizer):
+                                m.zero_point = nn.Parameter(m.zero_point)
+                                m.delta = nn.Parameter(m.delta)
+                            elif isinstance(m, UniformAffineQuantizer) and self.args.quant_act:
+                                if m.zero_point is not None:
+                                    if not torch.is_tensor(m.zero_point):
+                                        m.zero_point = nn.Parameter(torch.tensor(float(m.zero_point)))
+                                    else:
+                                        m.zero_point = nn.Parameter(m.zero_point)
+                    if self.args.ds:
+                        torch.save(qnn_.state_dict(), os.path.join(self.args.logdir, "ckpt.pth"))
+                    else:
+                        torch.save(qnn.state_dict(), os.path.join(self.args.logdir, "ckpt.pth"))
 
                 model = qnn
-                model_nobias = qnn_
+                model_nobias = qnn_ if self.args.ds else None
 
         model.to(self.device)
-        model_nobias.to(self.device)
+        if self.args.ds:
+            model_nobias.to(self.device)
         if self.args.verbose:
             logger.info("quantized model")
             logger.info(model)
 
         model.eval()
-        model_nobias.eval()
+        if self.args.ds:
+            model_nobias.eval()
 
         model.set_real_time(self.args.rt)
-        model_nobias.set_real_time(self.args.rt)
+        if self.args.ds:
+            model_nobias.set_real_time(self.args.rt)
+
+        model.set_full_prec(False)
+        if self.args.ds:
+            model_nobias.set_full_prec(False)
 
         # # test the correctness of delta-sigma
         # with torch.no_grad():
@@ -306,7 +418,6 @@ class Diffusion(object):
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(self.args.seed)
         with torch.no_grad():
-            all_results = []
             for i in tqdm.tqdm(
                 range(n_rounds), desc="Generating image samples for FID evaluation."
             ):
@@ -326,24 +437,13 @@ class Diffusion(object):
                 if img_id + x.shape[0] > self.args.max_images:
                     assert(i == n_rounds - 1)
                     n = self.args.max_images - img_id
-                    np_x_rgb = x[:n].permute(0, 2, 3, 1).cpu().numpy() * 255.
-                else:
-                    np_x_rgb = x.permute(0, 2, 3, 1).cpu().numpy() * 255.
-                np_x_rgb = np_x_rgb.round().astype(np.uint8)
-                all_results.append(np_x_rgb)
-
                 for i in range(n):
                     tvu.save_image(
                         x[i], os.path.join(self.args.image_folder, f"{img_id}.png")
                     )
                     img_id += 1
-                
-        all_results = np.concatenate(all_results[:total_n_samples], axis=0)
-        # shape_str = "x".join([str(x) for x in all_results.shape])
-        nppath = os.path.join(self.args.logdir, 'samples.npz')
-        np.savez(nppath, all_results)
 
-    def sample_image(self, x, model, model_nobias=None, last=True):
+    def sample_image(self, x, model, model_nobias=None, last=True, with_t=False):
         try:
             skip = self.args.skip
         except Exception:
@@ -370,7 +470,7 @@ class Diffusion(object):
                 xs = generalized_steps_ds(x, seq, model, model_nobias, betas, eta=self.args.eta, warm=self.args.warm)
             else:
                 xs = generalized_steps(
-                    x, seq, model, betas, eta=self.args.eta, args=self.args)
+                    x, seq, model, betas, eta=self.args.eta, args=self.args, with_t=with_t)
             x = xs
         elif self.args.sample_type == "dpm_solver":
             logger.info(f"use dpm-solver with {self.args.timesteps} steps")
@@ -410,6 +510,81 @@ class Diffusion(object):
         if last:
             x = x[0][-1]
         return x
+    
+    def generate(self, model):
+        config = self.config
+        logger.info(f"start to generate calibration imagers: {self.args.cali_n} for {self.args.cali_st} steps")
+        total_n_samples = self.args.cali_n
+        interval = self.args.timesteps // self.args.cali_st
+        n_rounds = math.ceil(total_n_samples / config.sampling.batch_size)
+
+        xs_lst = [[] for t in range(self.args.cali_st)]
+        ts_lst = [[] for t in range(self.args.cali_st)]
+        if self.args.residual:
+            xs_lst_prev = [[] for t in range(self.args.cali_st)]
+            ts_lst_prev = [[] for t in range(self.args.cali_st)]
+
+        torch.manual_seed(self.args.seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(self.args.seed)
+        with torch.no_grad():
+            for i in tqdm.tqdm(
+                range(n_rounds), desc="Generating image samples for FID evaluation."
+            ):
+                n = config.sampling.batch_size
+                x = torch.randn(
+                    n,
+                    config.data.channels,
+                    config.data.image_size,
+                    config.data.image_size,
+                    device=self.device
+                )
+                with amp.autocast(enabled=False):
+                    x = self.sample_image(x, model, last=False, with_t=True)
+                    for t in range(len(x[1])):
+                        if t % interval == 0:
+                            xs_lst[t // interval].append(x[0][t])
+                            ts_lst[t // interval].append(x[1][t])
+                            if self.args.residual:
+                                if t <= 1:
+                                    xs_lst_prev[t // interval].append(x[0][t])
+                                    ts_lst_prev[t // interval].append(x[1][t])
+                                else:
+                                    xs_lst_prev[t // interval].append(x[0][t-1])
+                                    ts_lst_prev[t // interval].append(x[1][t-1])
+                
+        xs = []
+        for item in xs_lst:
+            for idx in range(len(item)):
+                item[idx] = item[idx].cpu()
+            xs.append(torch.cat(item, dim=0))
+        xs = torch.stack(xs, dim=0)
+
+        ts = []
+        for item in ts_lst:
+            for idx in range(len(item)):
+                item[idx] = item[idx].cpu()
+            ts.append(torch.cat(item, dim=0))
+        ts = torch.stack(ts, dim=0)
+
+        if self.args.residual:
+            xs_prev = []
+            for item in xs_lst_prev:
+                for idx in range(len(item)):
+                    item[idx] = item[idx].cpu()
+                xs_prev.append(torch.cat(item, dim=0))
+            xs_prev = torch.stack(xs_prev, dim=0)
+
+            ts_prev = []
+            for item in ts_lst_prev:
+                for idx in range(len(item)):
+                    item[idx] = item[idx].cpu()
+                ts_prev.append(torch.cat(item, dim=0))
+            ts_prev = torch.stack(ts_prev, dim=0)
+
+            return xs, ts, xs_prev, ts_prev
+
+        return xs, ts
 
 
 def get_parser():
@@ -544,6 +719,10 @@ def get_parser():
     parser.add_argument('--warm', action='store_true')
     parser.add_argument('--rt', action='store_true')
     parser.add_argument('--act_channel', action='store_true')
+    parser.add_argument('--ckpt_nobias', type=str, default=None)
+
+    parser.add_argument('--generate', action='store_true')
+    parser.add_argument('--residual', action='store_true')
 
     return parser
 

@@ -7,12 +7,13 @@ def compute_alpha(beta, t):
     return a
 
 
-def generalized_steps(x, seq, model, b, **kwargs):
+def generalized_steps(x, seq, model, b, with_t=False, **kwargs):
     with torch.no_grad():
         n = x.size(0)
         seq_next = [-1] + list(seq[:-1])
         x0_preds = []
         xs = [x]
+        ts = []
         for i, j in zip(reversed(seq), reversed(seq_next)):
             t = (torch.ones(n) * i).to(x.device)
             next_t = (torch.ones(n) * j).to(x.device)
@@ -28,8 +29,12 @@ def generalized_steps(x, seq, model, b, **kwargs):
             c2 = ((1 - at_next) - c1 ** 2).sqrt()
             xt_next = at_next.sqrt() * x0_t + c1 * torch.randn_like(x) + c2 * et
             xs.append(xt_next.to('cpu'))
+            ts.append(t.to('cpu'))
 
-    return xs, x0_preds
+    if with_t:
+        return xs, ts, x0_preds
+    else:
+        return xs, x0_preds
 
 
 def generalized_steps_ds(x, seq, model, model_nobias, b, warm, **kwargs):
@@ -50,13 +55,17 @@ def generalized_steps_ds(x, seq, model, model_nobias, b, warm, **kwargs):
             at_next = compute_alpha(b, next_t.long())
             xt = xs[-1].to('cuda')
             if (i-t_max)%10 == 0:
+                # print('---------------------------------------')
                 model.reset_sd()
                 model_nobias.reset_sd()
                 model.set_full_prec(warm)
                 et = model(xt, t)
                 model_nobias.copy_sd(model)
+                # print('----------------model------------------')
             else:
                 et = model_nobias(xt, t)
+                # print('----------------model_nobias------------------')
+                # exit()
             x0_t = (xt - et * (1 - at).sqrt()) / at.sqrt()
             x0_preds.append(x0_t.to('cpu'))
             c1 = (
