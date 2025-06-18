@@ -136,7 +136,7 @@ class Diffusion(object):
                 generated_data = {"xs":xs, "ts":ts}
             else:
                 raise ValueError
-            torch.save(generated_data, os.path.join('/ocean/projects/cis240105p/wgao23/qdiff/calibrated_data/cifar10/cali_data.pt'))
+            torch.save(generated_data, os.path.join('/ocean/projects/cis240105p/wgao23/modiff/cali_data/cifar10/cali_data.pt'))
             exit()
 
         if self.args.ptq:
@@ -623,6 +623,7 @@ def get_parser():
     parser.add_argument("--modulate", action="store_true", help="if apply modulated computing")
     parser.add_argument("--act_tensor", action="store_true", help="use tensor-wise activation quantization")
     parser.add_argument("--generate", type=str, default=None, choices=[None, "raw", "residual"], help="generate calibration data")
+    parser.add_argument("--cali_min_max", action="store_true", help="use min-max of calibration datasets to init scaling")
 
     return parser
 
