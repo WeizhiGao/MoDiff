@@ -1,12 +1,17 @@
 # Modulated Diffusion: Accelerating Generative Modeling with Modulated Quantization
 
-This repository provides the official implementation of our ICML 2025 paper, [Modulated Diffusion: Accelerating Generative Modeling with Modulated Quantization](https://icml.cc/virtual/2025/poster/43551), along with the pretrained checkpoints and the calibrated dataset used for Q-Diffusion. MoDiff is designed to be compatible with any post-training quantization (PTQ) method, enabling lower activation precision without compromising generation quality.
+This repository provides the official implementation of our ICML 2025 paper, [Modulated Diffusion: Accelerating Generative Modeling with Modulated Quantization](https://icml.cc/virtual/2025/poster/43551), along with the pretrained checkpoints and the calibrated dataset used for Q-Diffusion. MoDiff is designed to be compatible with any post-training quantization (PTQ) method, enabling lower activation precision (up to 3 bits) without compromising generation quality.
 
 ![Example output on LSUN Church dataset](assets/example_church.png)
 
+Our MoDiff also scales to Stable Diffusion on text-guided image generation. Here is an example on COCO-MS-2014.
+
+![Example output on MS-COCO dataset](assets/example_coco.png)
 
 ## Overview
 Diffusion models have emerged as powerful generative models, but their high computation cost in iterative sampling remains a significant bottleneck. In this work, we present an in-depth and insightful study of state-of-the-art acceleration techniques for diffusion models, including caching and quantization, revealing their limitations in computation error and generation quality. To break these limits, this work introduces Modulated Diffusion (MoDiff), an innovative, rigorous, and principled framework that accelerates generative modeling through modulated quantization and error compensation. MoDiff not only inherents the advantages of existing caching and quantization methods but also serves as a general framework to accelerate all diffusion models. The advantages of MoDiff are supported by solid theoretical insight and analysis. In addition, extensive experiments on CIFAR-10 and LSUN demonstrate that MoDiff significant reduces activation quantization from 8 bits to 3 bits without performance degradation in post-training quantization (PTQ).
+
+![Method illustration](assets/modiff.png)
 
 ## Checkpoints Downloading
 - Download the corresponding pretrained models in https://ommer-lab.com/files/latent-diffusion, and put them into the corresponding folder in ```models/ldm/*```
