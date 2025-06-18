@@ -25,7 +25,6 @@ class BaseQuantBlock(nn.Module):
         super().__init__()
         self.use_weight_quant = False
         self.use_act_quant = False
-        self.sd = False
         # initialize quantizer
 
         self.act_quantizer = UniformAffineQuantizer(**act_quant_params)
@@ -40,9 +39,6 @@ class BaseQuantBlock(nn.Module):
         for m in self.modules():
             if isinstance(m, QuantModule):
                 m.set_quant_state(weight_quant, act_quant)
-
-    def set_use_sd(self, use_sd):
-        self.sd = use_sd
 
 
 class QuantResBlock(BaseQuantBlock, TimestepBlock):
@@ -123,18 +119,17 @@ class QuantQKMatMul(BaseQuantBlock):
         self.use_act_quant = False
         self.act_quantizer_q = UniformAffineQuantizer(**act_quant_params)
         self.act_quantizer_k = UniformAffineQuantizer(**act_quant_params)
-
-        self.delta = None
-        self.sigma = None
-        self.full_prec = False
         
     def forward(self, q, k):
-        if self.use_act_quant and (not self.sd) and (not self.full_prec):
-            quant_q = self.act_quantizer_q(q * self.scale)
-            quant_k = self.act_quantizer_k(k * self.scale)
+        if self.use_act_quant:
+            # quant_q = self.act_quantizer_q(q * self.scale)
+            # quant_k = self.act_quantizer_k(k * self.scale)
+            # weight = th.einsum(
+            #     "bct,bcs->bts", quant_q, quant_k
+            # ) 
             weight = th.einsum(
-                "bct,bcs->bts", quant_q, quant_k
-            ) 
+                "bct,bcs->bts", q * self.scale, k * self.scale
+            )
         else:
             weight = th.einsum(
                 "bct,bcs->bts", q * self.scale, k * self.scale
@@ -144,17 +139,6 @@ class QuantQKMatMul(BaseQuantBlock):
     def set_quant_state(self, weight_quant: bool = False, act_quant: bool = False):
         self.use_act_quant = act_quant
 
-    def set_real_time(self, real_time):
-        self.act_quantizer_q.real_time = real_time
-        self.act_quantizer_k.real_time = real_time
-
-    def set_full_prec(self, full_prec):
-        self.full_prec = full_prec
-
-    def reset_sd(self):
-        self.delta = None
-        self.sigma = None
-        
 
 class QuantSMVMatMul(BaseQuantBlock):
     def __init__(
@@ -167,34 +151,17 @@ class QuantSMVMatMul(BaseQuantBlock):
         act_quant_params_w['symmetric'] = False
         act_quant_params_w['always_zero'] = True
         self.act_quantizer_w = UniformAffineQuantizer(**act_quant_params_w)
-
-        self.delta = None
-        self.sigma = None
-        self.full_prec = False
         
     def forward(self, weight, v):
-        if self.use_act_quant and (not self.full_prec):
-            if not self.sd:
-                v = self.act_quantizer_v(v)
-            weight = self.act_quantizer_w(weight)
+        if self.use_act_quant:
             a = th.einsum("bts,bcs->bct", weight, v)
+            # a = th.einsum("bts,bcs->bct", self.act_quantizer_w(weight), self.act_quantizer_v(v))
         else:
             a = th.einsum("bts,bcs->bct", weight, v)
         return a
 
     def set_quant_state(self, weight_quant: bool = False, act_quant: bool = False):
         self.use_act_quant = act_quant
-
-    def set_real_time(self, real_time):
-        self.act_quantizer_w.real_time = real_time
-        self.act_quantizer_v.real_time = real_time
-
-    def set_full_prec(self, full_prec):
-        self.full_prec = full_prec
-
-    def reset_sd(self):
-        self.delta = None
-        self.sigma = None
 
 
 class QuantAttentionBlock(BaseQuantBlock):
@@ -379,17 +346,15 @@ class QuantAttnBlock(BaseQuantBlock):
         self.v = attn.v
         self.proj_out = attn.proj_out
 
-        self.act_quantizer_q = UniformAffineQuantizer(**act_quant_params)
-        self.act_quantizer_k = UniformAffineQuantizer(**act_quant_params)
-        self.act_quantizer_v = UniformAffineQuantizer(**act_quant_params)
-        
+        # we do not reduce the bit in attention in this work
         act_quant_params_w = act_quant_params.copy()
         act_quant_params_w['n_bits'] = sm_abit
         self.act_quantizer_w = UniformAffineQuantizer(**act_quant_params_w)
 
-        self.delta = None
-        self.sigma = None
-        self.full_prec = False
+        self.act_quantizer_q = UniformAffineQuantizer(**act_quant_params_w)
+        self.act_quantizer_k = UniformAffineQuantizer(**act_quant_params_w)
+        self.act_quantizer_v = UniformAffineQuantizer(**act_quant_params_w)
+
 
     def forward(self, x):
         h_ = x
@@ -403,9 +368,10 @@ class QuantAttnBlock(BaseQuantBlock):
         q = q.reshape(b, c, h*w)
         q = q.permute(0, 2, 1)   # b,hw,c
         k = k.reshape(b, c, h*w)  # b,c,hw
-        if self.use_act_quant and not self.sd:
-            q = self.act_quantizer_q(q)
-            k = self.act_quantizer_k(k)
+        if self.use_act_quant:
+            # q = self.act_quantizer_q(q)
+            # k = self.act_quantizer_k(k)
+            pass
         w_ = th.bmm(q, k)     # b,hw,hw    w[b,i,j]=sum_c q[b,i,c]k[b,c,j]
         w_ = w_ * (int(c)**(-0.5))
         w_ = nn.functional.softmax(w_, dim=2)
@@ -415,53 +381,19 @@ class QuantAttnBlock(BaseQuantBlock):
         w_ = w_.permute(0, 2, 1)   # b,hw,hw (first hw of k, second of q)
         # b, c,hw (hw of q) h_[b,c,j] = sum_i v[b,c,i] w_[b,i,j]
         if self.use_act_quant:
-            if not self.sd:
-                v = self.act_quantizer_v(v)
-            w_ = self.act_quantizer_w(w_)
-        # if self.use_act_quant:
-        #     if self.sd:
-        #         if self.delta is None:
-        #             pass
-        #         else:
-        #             w_ = w_ - self.delta
-        #         if not self.full_prec:
-        #             w_ = self.act_quantizer_w(w_)
-        #         if self.delta is None:
-        #             new_delta = w_.clone()
-        #         else:
-        #             new_delta = w_.clone() + self.delta
-        #     else:
-        #         v = self.act_quantizer_v(v)
-        #         w_ = self.act_quantizer_w(w_)
+            # v = self.act_quantizer_v(v)
+            # w_ = self.act_quantizer_w(w_)
+            pass
         h_ = th.bmm(v, w_)
-        # if self.sd:
-        #     if self.sigma is None:
-        #         pass
-        #     else:
-        #         h_ = h_ + self.sigma
-        #     new_sigma = h_.clone()
-        #     self.delta = new_delta.clone()
-        #     self.sigma = new_sigma.clone()
-
         h_ = h_.reshape(b, c, h, w)
 
         h_ = self.proj_out(h_)
         
         out = x + h_
         return out
-
-    def set_real_time(self, real_time):
-        self.act_quantizer_w.real_time = real_time
-        self.act_quantizer_q.real_time = real_time
-        self.act_quantizer_k.real_time = real_time
-        self.act_quantizer_v.real_time = real_time
-
-    def set_full_prec(self, full_prec):
-        self.full_prec = full_prec
     
-    def reset_sd(self):
-        self.delta = None
-        self.sigma = None
+    def set_dynamic_state(self, dynamic):
+        self.act_quantizer_w.dynamic = dynamic
 
 
 def get_specials(quant_act=False):

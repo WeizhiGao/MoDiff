@@ -2,7 +2,6 @@ import logging
 from typing import Union
 import numpy as np
 from tqdm import trange
-import copy
 
 import torch
 import torch.nn as nn
@@ -148,6 +147,158 @@ def save_inp_oup_data(model: QuantModel, layer: Union[QuantModule, BaseQuantBloc
             cached_inps = cached_inps.to(device)
         cached_outs = cached_outs.to(device)
     return cached_inps, cached_outs
+
+
+def save_inp_oup_data_modiff(model: QuantModel, layer: Union[QuantModule, BaseQuantBlock], cali_data: torch.Tensor,
+                      asym: bool = False, act_quant: bool = False, batch_size: int = 32, keep_gpu: bool = True,
+                      cond: bool = False, is_sm: bool = False):
+    """
+    Save input data and output data of a particular layer/block over calibration dataset.
+
+    :param model: QuantModel
+    :param layer: QuantModule or QuantBlock
+    :param cali_data: calibration data set
+    :param asym: if Ture, save quantized input and full precision output
+    :param act_quant: use activation quantization
+    :param batch_size: mini-batch size for calibration
+    :param keep_gpu: put saved data on GPU for faster optimization
+    :param cond: conditional generation or not
+    :param is_sm: avoid OOM when caching n^2 attention matrix when n is large
+    :return: input and output data
+    """
+    device = next(model.parameters()).device
+    get_inp_out = GetLayerInpOut(model, layer, device=device, asym=asym, act_quant=act_quant)
+    cached_batches = []
+    cached_inps, cached_outs = None, None
+    torch.cuda.empty_cache()
+
+    if not cond:
+        cali_xs, cali_ts, cali_xs_prev, cali_ts_prev = cali_data
+    else:
+        cali_xs, cali_xs_prev, cali_ts, cali_ts_prev, cali_conds = cali_data
+
+    if is_sm:
+        logger.info("Checking if attention is too large...")
+        if not cond:
+            test_inp, test_out = get_inp_out(
+                cali_xs[:1].to(device), 
+                cali_ts[:1].to(device)
+            )
+        else:
+            test_inp, test_out = get_inp_out(
+                cali_xs[:1].to(device), 
+                cali_ts[:1].to(device),
+                cali_conds[:1].to(device)
+            )
+            
+        is_sm = False
+        if (isinstance(test_inp, tuple) and test_inp[0].shape[1] == test_inp[0].shape[2]):
+            logger.info(f"test_inp shape: {test_inp[0].shape}, {test_inp[1].shape}")
+            if test_inp[0].shape[1] == 4096:
+                is_sm = True
+        if test_out.shape[1] == test_out.shape[2]:
+            logger.info(f"test_out shape: {test_out.shape}")
+            if test_out.shape[1] == 4096:
+                is_sm = True
+            
+        if is_sm:
+            logger.info("Confirmed. Trading speed for memory when caching attn matrix calibration data")
+            inds = np.random.choice(cali_xs.size(0), cali_xs.size(0) // 2, replace=False)
+        else:
+            logger.info("Nope. Using normal caching method")
+    
+    
+    num = int(cali_xs.size(0) / batch_size)
+    if is_sm:
+        num //= 2
+    l_in_0, l_in_1, l_in, l_out = 0, 0, 0, 0
+    for i in trange(num):
+        if not cond:
+            model.reset_cache()
+            prev_inp, _ = get_inp_out(
+                cali_xs_prev[i * batch_size:(i + 1) * batch_size].to(device), 
+                cali_ts_prev[i * batch_size:(i + 1) * batch_size].to(device)
+            ) if not is_sm else get_inp_out(
+                cali_xs_prev[inds[i * batch_size:(i + 1) * batch_size]].to(device), 
+                cali_ts_prev[inds[i * batch_size:(i + 1) * batch_size]].to(device)
+            )
+            model.reset_cache()
+            cur_inp, cur_out = get_inp_out(
+                cali_xs[i * batch_size:(i + 1) * batch_size].to(device), 
+                cali_ts[i * batch_size:(i + 1) * batch_size].to(device)
+            ) if not is_sm else get_inp_out(
+                cali_xs[inds[i * batch_size:(i + 1) * batch_size]].to(device), 
+                cali_ts[inds[i * batch_size:(i + 1) * batch_size]].to(device)
+            )
+        else:
+            cur_inp, cur_out = get_inp_out(
+                cali_xs[i * batch_size:(i + 1) * batch_size].to(device), 
+                cali_ts[i * batch_size:(i + 1) * batch_size].to(device),
+                cali_conds[i * batch_size:(i + 1) * batch_size].to(device)
+            ) if not is_sm else get_inp_out(
+                cali_xs[inds[i * batch_size:(i + 1) * batch_size]].to(device), 
+                cali_ts[inds[i * batch_size:(i + 1) * batch_size]].to(device),
+                cali_conds[inds[i * batch_size:(i + 1) * batch_size]].to(device)
+            )
+        if isinstance(cur_inp, tuple):
+            cur_x, cur_t = cur_inp
+            prev_x, prev_t = prev_inp
+            if not is_sm:
+                cached_batches.append(((cur_x.cpu(), cur_t.cpu()), (prev_x.cpu(), prev_t.cpu()), cur_out.cpu()))
+            else:
+                if cached_inps is None:
+                    l_in_0 = cur_x.shape[0] * num
+                    l_in_1 = cur_t.shape[0] * num
+                    cached_inps = [torch.zeros(l_in_0, *cur_x.shape[1:]), torch.zeros(l_in_1, *cur_t.shape[1:])]
+                cached_inps[0].index_copy_(0, torch.arange(i * cur_x.shape[0], (i + 1) * cur_x.shape[0]), cur_x.cpu())
+                cached_inps[1].index_copy_(0, torch.arange(i * cur_t.shape[0], (i + 1) * cur_t.shape[0]), cur_t.cpu())
+        else:
+            if not is_sm:
+                cached_batches.append((cur_inp.cpu(), prev_inp.cpu(), cur_out.cpu()))
+            else:
+                if cached_inps is None:
+                    l_in = cur_inp.shape[0] * num
+                    cached_inps = torch.zeros(l_in, *cur_inp.shape[1:])
+                cached_inps.index_copy_(0, torch.arange(i * cur_inp.shape[0], (i + 1) * cur_inp.shape[0]), cur_inp.cpu())
+        
+        if is_sm:
+            if cached_outs is None:
+                l_out = cur_out.shape[0] * num
+                cached_outs = torch.zeros(l_out, *cur_out.shape[1:])
+            cached_outs.index_copy_(0, torch.arange(i * cur_out.shape[0], (i + 1) * cur_out.shape[0]), cur_out.cpu())
+
+    if not is_sm:
+        if isinstance(cached_batches[0][0], tuple):
+            cached_inps = [
+                torch.cat([x[0][0] for x in cached_batches]), 
+                torch.cat([x[0][1] for x in cached_batches])
+            ]
+            cached_inps_prev = [
+                torch.cat([x[1][0] for x in cached_batches]), 
+                torch.cat([x[1][1] for x in cached_batches])
+            ]
+        else:
+            cached_inps = torch.cat([x[0] for x in cached_batches])
+            cached_inps_prev = torch.cat([x[1] for x in cached_batches])
+        cached_outs = torch.cat([x[2] for x in cached_batches])
+    
+    if isinstance(cached_inps, list):
+        logger.info(f"in 1 shape: {cached_inps[0].shape}, in 2 shape: {cached_inps[1].shape}")
+    else:
+        logger.info(f"in shape: {cached_inps.shape}")
+    logger.info(f"out shape: {cached_outs.shape}")
+    torch.cuda.empty_cache()
+    if keep_gpu:
+        if isinstance(cached_inps, list):
+            cached_inps[0] = cached_inps[0].to(device)
+            cached_inps[1] = cached_inps[1].to(device)
+            cached_inps_prev[0] = cached_inps_prev[0].to(device)
+            cached_inps_prev[1] = cached_inps_prev[1].to(device)
+        else:
+            cached_inps = cached_inps.to(device)
+            cached_inps_prev = cached_inps.to(device)
+        cached_outs = cached_outs.to(device)
+    return cached_inps, cached_inps_prev, cached_outs
 
 
 def save_grad_data(model: QuantModel, layer: Union[QuantModule, BaseQuantBlock], cali_data: torch.Tensor,
@@ -323,7 +474,7 @@ def quantize_model_till(model: QuantModule, layer: Union[QuantModule, BaseQuantB
             break
 
 
-def get_train_samples(args, sample_data, custom_steps=None):
+def get_train_samples(args, sample_data, custom_steps=None, with_prev=False):
     num_samples, num_st = args.cali_n, args.cali_st
     custom_steps = args.custom_steps if custom_steps is None else custom_steps
     if num_st == 1:
@@ -332,20 +483,28 @@ def get_train_samples(args, sample_data, custom_steps=None):
     else:
         # get the real number of timesteps (especially for DDIM)
         nsteps = len(sample_data["ts"])
-        assert(nsteps >= custom_steps)
+        # assert(nsteps >= custom_steps)
         timesteps = list(range(0, nsteps, nsteps//num_st))
         logger.info(f'Selected {len(timesteps)} steps from {nsteps} sampling steps')
         xs_lst = [sample_data["xs"][i][:num_samples] for i in timesteps]
         ts_lst = [sample_data["ts"][i][:num_samples] for i in timesteps]
+        if with_prev:
+            xs_lst_prev = [sample_data["xs_prev"][i][:num_samples] for i in timesteps]
+            ts_lst_prev = [sample_data["ts_prev"][i][:num_samples] for i in timesteps]
         if args.cond:
             xs_lst += xs_lst
             ts_lst += ts_lst
             conds_lst = [sample_data["cs"][i][:num_samples] for i in timesteps] + [sample_data["ucs"][i][:num_samples] for i in timesteps]
         xs = torch.cat(xs_lst, dim=0)
         ts = torch.cat(ts_lst, dim=0)
+        if with_prev:
+            xs_prev = torch.cat(xs_lst_prev, dim=0)
+            ts_prev = torch.cat(ts_lst_prev, dim=0)
         if args.cond:
             conds = torch.cat(conds_lst, dim=0)
             return xs, ts, conds
+    if with_prev:
+        return xs, ts, xs_prev, ts_prev
     return xs, ts
 
 
@@ -380,14 +539,22 @@ def convert_adaround(model):
             convert_adaround(module)
 
 
-def resume_cali_model(qnn, ckpt_path, cali_data, quant_act=False, act_quant_mode='qdiff', cond=False, rt=False):
+def resume_cali_model(qnn, ckpt_path, cali_data, quant_act=False, act_quant_mode='qdiff', cond=False):
     print("Loading quantized model checkpoint")
     ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=True)
+
+    # for keys, values in ckpt.items():
+    #     if 'delta' in keys and 'act' in keys:
+    #         print(keys, values)
+    # exit()
     
     print("Initializing weight quantization parameters")
     qnn.set_quant_state(True, False)
     if not cond:
-        cali_xs, cali_ts = cali_data
+        if len(cali_data) == 4:
+            cali_xs, cali_ts, cali_xs_prev, cali_ts_prev = cali_data
+        else:
+            cali_xs, cali_ts = cali_data
         _ = qnn(cali_xs[:1].cuda(), cali_ts[:1].cuda())
     else:
         cali_xs, cali_ts, cali_cs = cali_data
@@ -404,7 +571,7 @@ def resume_cali_model(qnn, ckpt_path, cali_data, quant_act=False, act_quant_mode
     keys = [key for key in ckpt.keys() if "act" in key]
     for key in keys:
         del ckpt[key]
-    qnn.load_state_dict(ckpt, strict=(act_quant_mode=='qdiff'))
+    qnn.load_state_dict(ckpt, strict=True)
     qnn.set_quant_state(weight_quant=True, act_quant=False)
     
     for m in qnn.model.modules():
@@ -422,6 +589,7 @@ def resume_cali_model(qnn, ckpt_path, cali_data, quant_act=False, act_quant_mode
         qnn.set_quant_state(True, True)
         if not cond:
             _ = qnn(cali_xs[:1].cuda(), cali_ts[:1].cuda())
+            _ = qnn(cali_xs[:1].cuda(), cali_ts[:1].cuda())
         else:
             _ = qnn(cali_xs[:1].cuda(), cali_ts[:1].cuda(), cali_cs[:1].cuda())
         print("Loading quantized model checkpoint again")
@@ -437,39 +605,31 @@ def resume_cali_model(qnn, ckpt_path, cali_data, quant_act=False, act_quant_mode
                     else:
                         m.zero_point = nn.Parameter(m.zero_point)
                     
-        ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=True)
-        if not rt:
+        if act_quant_mode == "qdiff":
+            ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=True)
+            # keys = [key for key in ckpt.keys() if "attention" in key]
+            # for key in keys:
+            #     del ckpt[key]
             qnn.load_state_dict(ckpt)
-            qnn.set_quant_state(weight_quant=True, act_quant=True)
-            for m in qnn.model.modules():
-                if isinstance(m, AdaRoundQuantizer):
-                    zero_data = m.zero_point.data
-                    delattr(m, "zero_point")
-                    m.zero_point = zero_data
-
-                    delta_data = m.delta.data
-                    delattr(m, "delta")
-                    m.delta = delta_data
-                elif isinstance(m, UniformAffineQuantizer):
-                    if m.zero_point is not None:
-                        zero_data = m.zero_point.item()
-                        delattr(m, "zero_point")
-                        assert(int(zero_data) == zero_data)
-                        m.zero_point = int(zero_data)
         qnn.set_quant_state(weight_quant=True, act_quant=True)
-
-
-def create_nobias_model(model):
-    model_nobias = copy.deepcopy(model)
-    att_key = ['proj_out']
-    # att_key = ['k', 'q', 'v', 'proj_out']
-    for name, module in model_nobias.named_modules():
-        # if isinstance(module, QuantModule) and name.split('.')[-1] not in att_key:
-        if isinstance(module, QuantModule):
-            if module.fwd_func in [F.conv2d, F.conv1d]:
-                module.bias = None
-                module.org_bias = None
         
-    # print(model_nobias)
+        for m in qnn.model.modules():
+            if isinstance(m, AdaRoundQuantizer):
+                zero_data = m.zero_point.data
+                delattr(m, "zero_point")
+                m.zero_point = zero_data
 
-    return model_nobias
+                delta_data = m.delta.data
+                delattr(m, "delta")
+                m.delta = delta_data
+            elif isinstance(m, UniformAffineQuantizer):
+                if m.zero_point is not None:
+                    zero_data = m.zero_point.item()
+                    delattr(m, "zero_point")
+                    assert(int(zero_data) == zero_data)
+                    m.zero_point = int(zero_data)
+
+    # for key, value in qnn.state_dict().items():
+    #     if 'act' in key:
+    #         logging.info(key + ': ' + str(value.item()))
+    # exit()

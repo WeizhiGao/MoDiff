@@ -1,0 +1,11 @@
+__pycache__/
+*.zip
+*.ckpt
+*.egg-info/
+*.png
+*.pth
+*.pt
+*.pdf
+.ipynb_checkpoints/
+/jobs
+/log

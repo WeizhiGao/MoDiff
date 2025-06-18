@@ -1,7 +1,7 @@
 import logging
 import torch.nn as nn
 from qdiff.quant_block import get_specials, BaseQuantBlock
-from qdiff.quant_block import QuantBasicTransformerBlock, QuantResBlock
+from qdiff.quant_block import QuantBasicTransformerBlock, QuantResBlock, QuantAttnBlock
 from qdiff.quant_block import QuantQKMatMul, QuantSMVMatMul, QuantBasicTransformerBlock, QuantAttnBlock
 from qdiff.quant_layer import QuantModule, StraightThrough
 from ldm.modules.attention import BasicTransformerBlock
@@ -15,6 +15,7 @@ class QuantModel(nn.Module):
         super().__init__()
         self.model = model
         self.sm_abit = kwargs.get('sm_abit', 8)
+        self.modulate = kwargs.get("modulate", False)
         self.in_channels = model.in_channels
         if hasattr(model, 'image_size'):
             self.image_size = model.image_size
@@ -32,13 +33,8 @@ class QuantModel(nn.Module):
         prev_quantmodule = None
         for name, child_module in module.named_children():
             if isinstance(child_module, (nn.Conv2d, nn.Conv1d, nn.Linear)): # nn.Conv1d
-                # if isinstance(child_module, (nn.Conv2d, nn.Conv1d)) and name.split('.')[-1] != 'proj_out':
-                if isinstance(child_module, (nn.Conv2d, nn.Conv1d)):
-                    sd = True
-                else:
-                    sd = False
                 setattr(module, name, QuantModule(
-                    child_module, weight_quant_params, act_quant_params, sd=sd))
+                    child_module, weight_quant_params, act_quant_params, modulate=self.modulate))
                 prev_quantmodule = getattr(module, name)
 
             elif isinstance(child_module, StraightThrough):
@@ -69,47 +65,22 @@ class QuantModel(nn.Module):
         for m in self.model.modules():
             if isinstance(m, (QuantModule, BaseQuantBlock)):
                 m.set_quant_state(weight_quant, act_quant)
-
-    def set_use_sd(self, use_sd):
+    
+    def set_dynamic_state(self, dynamic):
         for m in self.model.modules():
-            if isinstance(m, (QuantModule, BaseQuantBlock)):
-                m.set_use_sd(use_sd)
+            if isinstance(m, (QuantModule, QuantAttnBlock)):
+                m.set_dynamic_state(dynamic)
 
-    def set_real_time(self, real_time):
+    def set_modulation(self, modulation):
         for m in self.model.modules():
-            if isinstance(m, (QuantModule, QuantAttnBlock, QuantQKMatMul, QuantSMVMatMul)):
-                m.set_real_time(real_time)
+            if isinstance(m, QuantModule):
+                m.set_modualtion(modulation)
 
-    def set_full_prec(self, full_prec):
+    def reset_cache(self):
         for m in self.model.modules():
-            if isinstance(m, (QuantModule, QuantAttnBlock, QuantQKMatMul, QuantSMVMatMul)):
-                m.set_full_prec(full_prec)
-
-    def reset_sd(self):
-        for m in self.model.modules():
-            if isinstance(m, (QuantModule, QuantAttnBlock, QuantQKMatMul, QuantSMVMatMul)):
-                m.reset_sd()
-
-    def copy_sd(self, model):
-        for name1, module1 in self.model.named_modules():
-            for name2, module2 in model.model.named_modules():
-                if isinstance(module1, (QuantModule)) and isinstance(module2, (QuantModule)):
-                    if name1 == name2 and module2.delta != None:
-                        module1.delta = module2.delta.clone()
-                        module1.sigma = module2.sigma.clone()
-                if isinstance(module1, (QuantAttnBlock)) and isinstance(module2, (QuantAttnBlock)):
-                    if name1 == name2 and module2.delta != None:
-                        module1.delta = module2.delta.clone()
-                        module1.sigma = module2.sigma.clone()
-                if isinstance(module1, (QuantQKMatMul)) and isinstance(module2, (QuantQKMatMul)):
-                    if name1 == name2 and module2.delta != None:
-                        module1.delta = module2.delta.clone()
-                        module1.sigma = module2.sigma.clone()
-                if isinstance(module1, (QuantSMVMatMul)) and isinstance(module2, (QuantSMVMatMul)):
-                    if name1 == name2 and module2.delta != None:
-                        module1.delta = module2.delta.clone()
-                        module1.sigma = module2.sigma.clone()
-
+            if isinstance(m, QuantModule):
+                m.reset_cache()
+                              
     def forward(self, x, timesteps=None, context=None):
         return self.model(x, timesteps, context)
     

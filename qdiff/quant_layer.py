@@ -46,7 +46,7 @@ class UniformAffineQuantizer(nn.Module):
     :param scale_method: determines the quantization scale and zero point
     """
     def __init__(self, n_bits: int = 8, symmetric: bool = False, channel_wise: bool = False, scale_method: str = 'max',
-                 leaf_param: bool = False, always_zero: bool = False, act_channel=False):
+                 leaf_param: bool = False, always_zero: bool = False, dynamic: bool = False):
         super(UniformAffineQuantizer, self).__init__()
         self.sym = symmetric
         # assert 2 <= n_bits <= 8, 'bitwidth not supported'
@@ -62,19 +62,29 @@ class UniformAffineQuantizer(nn.Module):
         self.always_zero = always_zero
         if self.leaf_param:
             self.x_min, self.x_max = None, None
-        self.real_time = False
-        self.act_channel = act_channel
+        self.dynamic = dynamic
+
+        # self.print_info = False
+        # self.count = 0
 
     def forward(self, x: torch.Tensor):
 
-        if self.inited is False or self.real_time:
+        if self.inited is False:
             if self.leaf_param:
-                delta, zero_point = self.init_quantization_scale(x, self.channel_wise)
+                delta, self.zero_point = self.init_quantization_scale(x, self.channel_wise)
                 self.delta = torch.nn.Parameter(delta)
-                self.zero_point = torch.nn.Parameter(zero_point) if self.real_time else zero_point
+                # self.zero_point = torch.nn.Parameter(self.zero_point)
             else:
                 self.delta, self.zero_point = self.init_quantization_scale(x, self.channel_wise)
             self.inited = True
+
+        if self.dynamic and (self.inited is True):
+            delta, zero_point = self.init_quantization_scale(x, self.channel_wise)
+            self.delta = torch.nn.Parameter(delta)
+            if isinstance(self.zero_point, torch.nn.Parameter):
+                self.zero_point = torch.nn.Parameter(zero_point)
+            else:
+                self.zero_point = zero_point
 
         if self.running_stat:
             self.act_momentum_update(x)
@@ -82,12 +92,22 @@ class UniformAffineQuantizer(nn.Module):
         # start quantization
         # print(f"x shape {x.shape} delta shape {self.delta.shape} zero shape {self.zero_point.shape}")
         x_int = round_ste(x / self.delta) + self.zero_point
+        # overflow = ((x_int<0).sum() + (x_int>=16).sum()) / x.numel()
+        # print(x_int.max().item(), x_int.min().item(), overflow.item())
         x_quant = torch.clamp(x_int, 0, self.n_levels - 1)
         if self.sym:
             x_quant = torch.clamp(x_int, -self.n_levels - 1, self.n_levels)
         else:
             x_quant = torch.clamp(x_int, 0, self.n_levels - 1)
         x_dequant = (x_quant - self.zero_point) * self.delta
+
+        # if self.print_info:
+        #     self.count += 1
+        #     logging.info(f'{self.count} input ' + str((x.max()-x.min()).item()))
+        #     logging.info(f'{self.count} delta ' + str(self.delta.item()))
+        #     logging.info(f'{self.count} error ' + str(((x-x_dequant).view(32, -1)**2).sum(dim=1).sqrt().mean().item()))
+        #     logging.info('\n')
+        
         return x_dequant
     
     def act_momentum_update(self, x: torch.Tensor, act_range_momentum: float = 0.95):
@@ -139,62 +159,35 @@ class UniformAffineQuantizer(nn.Module):
                     zero_point = zero_point.view(-1, 1)
             else:
                 # For dynamic activation quantization which is more efficient compared with loops
-                if not self.act_channel:
-                    x_clone = x.clone().detach()
-                    n_channels = x_clone.shape[0]
-                    if len(x.shape) == 4:
-                        x_max = x_clone.max(dim=-1)[0].max(dim=-1)[0].max(dim=-1)[0]
-                        x_min = x_clone.min(dim=-1)[0].min(dim=-1)[0].min(dim=-1)[0]
-                    elif len(x.shape) == 3:
-                        x_max = x_clone.max(dim=-1)[0].max(dim=-1)[0]
-                        x_min = x_clone.min(dim=-1)[0].min(dim=-1)[0]
-                    else:
-                        x_max = x_clone.max(dim=-1)[0]
-                        x_min = x_clone.min(dim=-1)[0]
-                    delta = x_max.clone()
-                    zero_point = x_max.clone()
-                    # determine the scale and zero point channel-by-channel
-                    # for c in range(n_channels):
-                    #     delta[c], zero_point[c] = self.init_quantization_scale(x_clone[c], channel_wise=False)
-                    x_absmax = torch.maximum((x_min).abs(), x_max)
-                    if self.sym:
-                        # x_min, x_max = -x_absmax if x_min < 0 else 0, x_absmax
-                        delta = x_absmax / self.n_levels
-                    else:
-                        delta = (x_max - x_min) / (self.n_levels - 1)
-                    delta[delta<1e-8]=1e-8
-                    zero_point = (-x_min / delta).round() if not (self.sym or self.always_zero) else torch.zeros_like(delta)
-                    if len(x.shape) == 4:
-                        delta = delta.view(-1, 1, 1, 1)
-                        zero_point = zero_point.view(-1, 1, 1, 1)
-                    elif len(x.shape) == 3:
-                        delta = delta.view(-1, 1, 1)
-                        zero_point = zero_point.view(-1, 1, 1)
-                    else:
-                        delta = delta.view(-1, 1)
-                        zero_point = zero_point.view(-1, 1)
+                x_clone = x.clone().detach()
+                n_channels = x_clone.shape[0]
+                if len(x.shape) == 4:
+                    x_max = x_clone.max(dim=-1)[0].max(dim=-1)[0].max(dim=-1)[0]
+                    x_min = x_clone.min(dim=-1)[0].min(dim=-1)[0].min(dim=-1)[0]
+                elif len(x.shape) == 3:
+                    x_max = x_clone.max(dim=-1)[0].max(dim=-1)[0]
+                    x_min = x_clone.min(dim=-1)[0].min(dim=-1)[0]
                 else:
-                    x_clone = x.clone().detach()
-                    num_channels = x_clone.shape[1]
-                    delta = torch.zeros_like(x)
-                    zero_point = torch.zeros_like(x)
-                    if len(x.shape) == 4:
-                        x_max = x_clone.max(dim=-1)[0].max(dim=-1)[0]
-                        x_min = x_clone.min(dim=-1)[0].min(dim=-1)[0]
-                    elif len(x.shape) == 3:
-                        x_max = x_clone.max(dim=-1)[0]
-                        x_min = x_clone.min(dim=-1)[0]
-                    else:
-                        x_max = x_clone
-                        x_min = x_clone
-                    x_absmax = torch.maximum((x_min).abs(), x_max)
-                    if self.sym:
-                        # x_min, x_max = -x_absmax if x_min < 0 else 0, x_absmax
-                        delta = delta + x_absmax / self.n_levels
-                    else:
-                        delta = delta + (x_max - x_min) / (self.n_levels - 1)
-                    delta[delta<1e-8]=1e-8
-                    zero_point = (-x_min / delta).round() if not (self.sym or self.always_zero) else torch.zeros_like(x)
+                    x_max = x_clone.max(dim=-1)[0]
+                    x_min = x_clone.min(dim=-1)[0]
+                delta = x_max.clone()
+                zero_point = x_max.clone()
+                x_absmax = torch.maximum((x_min).abs(), x_max)
+                if self.sym:
+                    delta = x_absmax / self.n_levels
+                else:
+                    delta = (x_max - x_min) / (self.n_levels - 1)
+                delta[delta<1e-8]=1e-8
+                zero_point = (-x_min / delta).round() if not (self.sym or self.always_zero) else torch.zeros_like(delta)
+                if len(x.shape) == 4:
+                    delta = delta.view(-1, 1, 1, 1)
+                    zero_point = zero_point.view(-1, 1, 1, 1)
+                elif len(x.shape) == 3:
+                    delta = delta.view(-1, 1, 1)
+                    zero_point = zero_point.view(-1, 1, 1)
+                else:
+                    delta = delta.view(-1, 1)
+                    zero_point = zero_point.view(-1, 1)
         else:
             if self.leaf_param:
                 self.x_min = x.data.min()
@@ -217,7 +210,7 @@ class UniformAffineQuantizer(nn.Module):
                     # warnings.warn('Quantization range close to zero: [{}, {}]'.format(x_min, x_max))
                     delta = 1e-8
 
-                zero_point = round(-x_min / delta) if not (self.sym or self.always_zero) else 0
+                zero_point = round(-x.min().item() / delta) if not (self.sym or self.always_zero) else 0
                 delta = torch.tensor(delta).type_as(x)
 
             elif self.scale_method == 'mse':
@@ -230,7 +223,7 @@ class UniformAffineQuantizer(nn.Module):
                     x_q = self.quantize(x, new_max, new_min)
                     # L_p norm minimization as described in LAPQ
                     # https://arxiv.org/abs/1911.07190
-                    score = lp_loss(x, x_q, p=2.4, reduction='all')
+                    score = lp_loss(x, x_q, 2.4, reduction='all')
                     if score < best_score:
                         best_score = score
                         delta = (new_max - new_min) / (2 ** self.n_bits - 1) \
@@ -267,7 +260,8 @@ class QuantModule(nn.Module):
     To activate quantization, please use set_quant_state function.
     """
     def __init__(self, org_module: Union[nn.Conv2d, nn.Linear, nn.Conv1d], weight_quant_params: dict = {},
-                 act_quant_params: dict = {}, disable_act_quant: bool = False, act_quant_mode: str = 'qdiff', sd=False):
+                 act_quant_params: dict = {}, disable_act_quant: bool = False, act_quant_mode: str = 'qdiff',
+                 modulate: bool = False):
         super(QuantModule, self).__init__()
         self.weight_quant_params = weight_quant_params
         self.act_quant_params = act_quant_params
@@ -297,8 +291,7 @@ class QuantModule(nn.Module):
         self.disable_act_quant = disable_act_quant
         # initialize quantizer
         self.weight_quantizer = UniformAffineQuantizer(**self.weight_quant_params)
-        if self.act_quant_mode == 'qdiff':
-            self.act_quantizer = UniformAffineQuantizer(**self.act_quant_params)
+        self.act_quantizer = UniformAffineQuantizer(**self.act_quant_params)
         self.split = 0
 
         self.activation_function = StraightThrough()
@@ -306,11 +299,10 @@ class QuantModule(nn.Module):
 
         self.extra_repr = org_module.extra_repr
 
-        self.sd = sd
-        self.delta = None
-        self.sigma = None
-        self.use_sd = False
-        self.full_prec = False
+        # Store intermediate states
+        self.modulate = modulate
+        self.a_hat = None
+        self.o_hat = None
 
     def forward(self, input: torch.Tensor, split: int = 0):
         if split != 0 and self.split != 0:
@@ -321,40 +313,38 @@ class QuantModule(nn.Module):
             self.set_split()
 
         if not self.disable_act_quant and self.use_act_quant:
-            if self.split != 0:
-                if self.sd and self.use_sd:
-                    if self.delta is None:
-                        pass
-                    else:
-                        input = input - self.delta
-                    if self.act_quant_mode == 'qdiff' and (not self.full_prec):
-                        input_0 = self.act_quantizer(input[:, :self.split, :, :])
-                        input_1 = self.act_quantizer_0(input[:, self.split:, :, :])
-                        input = torch.cat([input_0, input_1], dim=1)
-                    if self.delta is None:
-                        new_delta = input.clone()
-                    else:
-                        new_delta = input.clone() + self.delta
+            if self.a_hat == None:
+                assert(self.o_hat, None)
+
+            if self.modulate:
+                if self.a_hat is None:
+                    self.a_hat = input.clone().detach()
+                    # if self.split != 0:
+                    #     input_0 = self.act_quantizer(input[:, :self.split, :, :])
+                    #     input_1 = self.act_quantizer_0(input[:, self.split:, :, :])
+                    #     input = torch.cat([input_0, input_1], dim=1)
+                    # else:
+                    #     input = self.act_quantizer(input)
+                    # self.a_hat = input.clone().detach()
                 else:
-                    if self.act_quant_mode == 'qdiff':
+                    input = input - self.a_hat
+                    if self.split != 0:
                         input_0 = self.act_quantizer(input[:, :self.split, :, :])
                         input_1 = self.act_quantizer_0(input[:, self.split:, :, :])
                         input = torch.cat([input_0, input_1], dim=1)
+                    else:
+                        # if self.act_quantizer.delta is not None:
+                        #     print("uniform", (input.max()-input.min()).item()/15)
+                        #     print("delta", self.act_quantizer.delta.item())
+                        input = self.act_quantizer(input)
+                    self.a_hat = (self.a_hat + input).clone().detach()
             else:
-                if self.sd and self.use_sd:
-                    if self.delta is None:
-                        pass
-                    else:
-                        input = input - self.delta
-                    if self.act_quant_mode == 'qdiff' and (not self.full_prec):
-                        input = self.act_quantizer(input)
-                    if self.delta is None:
-                        new_delta = input.clone()
-                    else:
-                        new_delta = input.clone() + self.delta
+                if self.split != 0:
+                    input_0 = self.act_quantizer(input[:, :self.split, :, :])
+                    input_1 = self.act_quantizer_0(input[:, self.split:, :, :])
+                    input = torch.cat([input_0, input_1], dim=1)
                 else:
-                    if self.act_quant_mode == 'qdiff':
-                        input = self.act_quantizer(input)
+                    input = self.act_quantizer(input)
         if self.use_weight_quant:
             if self.split != 0:
                 weight_0 = self.weight_quantizer(self.weight[:, :self.split, ...])
@@ -366,51 +356,42 @@ class QuantModule(nn.Module):
         else:
             weight = self.org_weight
             bias = self.org_bias
-    
-        if self.sd and self.use_sd:
-            out = self.fwd_func(input, weight, bias, **self.fwd_kwargs)
-            if self.sigma is None:
-                pass
+        
+        if self.modulate and self.use_act_quant:
+            if self.o_hat is None:
+                out = self.fwd_func(input, weight, bias, **self.fwd_kwargs)
             else:
-                out = out + self.sigma
-            new_sigma = out.clone()
-        else: 
+                out = self.fwd_func(input, weight, None, **self.fwd_kwargs)
+                out = self.o_hat + out
+            self.o_hat = out.clone().detach()
+        else:
             out = self.fwd_func(input, weight, bias, **self.fwd_kwargs)
 
         out = self.activation_function(out)
 
-        if self.sd and self.use_sd and not self.disable_act_quant and self.use_act_quant:
-            self.delta = new_delta.clone()
-            self.sigma = new_sigma.clone()
-        
         return out
 
     def set_quant_state(self, weight_quant: bool = False, act_quant: bool = False):
         self.use_weight_quant = weight_quant
         self.use_act_quant = act_quant
 
+    def set_dynamic_state(self, dynamic):
+        self.act_quantizer.dynamic = dynamic
+        if self.split != 0:
+            self.act_quantizer_0.dynamic = dynamic
+
+    def set_modualtion(self, modulation):
+        self.modulate = modulation
+
+    def reset_cache(self):
+        self.a_hat = None
+        self.o_hat = None
+
     def set_split(self):
         self.weight_quantizer_0 = UniformAffineQuantizer(**self.weight_quant_params)
-        if self.act_quant_mode == 'qdiff':
-            self.act_quantizer_0 = UniformAffineQuantizer(**self.act_quant_params)
+        self.act_quantizer_0 = UniformAffineQuantizer(**self.act_quant_params)
 
     def set_running_stat(self, running_stat: bool):
-        if self.act_quant_mode == 'qdiff':
-            self.act_quantizer.running_stat = running_stat
-            if self.split != 0:
-                self.act_quantizer_0.running_stat = running_stat
-
-    def set_use_sd(self, use_sd):
-        self.use_sd = use_sd
-
-    def reset_sd(self):
-        self.delta = None
-        self.sigma = None
-
-    def set_full_prec(self, full_prec):
-        self.full_prec = full_prec
-
-    def set_real_time(self, real_time):
-        self.act_quantizer.real_time = real_time
+        self.act_quantizer.running_stat = running_stat
         if self.split != 0:
-            self.act_quantizer_0.real_time = real_time
+            self.act_quantizer_0.running_stat = running_stat

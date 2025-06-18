@@ -10,12 +10,9 @@ from ldm.modules.diffusionmodules.util import make_ddim_sampling_parameters, mak
 
 
 class DDIMSampler(object):
-    def __init__(self, model, ds=False, model_nobias=None, warm=True, schedule="linear", **kwargs):
+    def __init__(self, model, schedule="linear", **kwargs):
         super().__init__()
         self.model = model
-        self.model_nobias = model_nobias
-        self.ds=ds
-        self.warm=warm
         self.ddpm_num_timesteps = model.num_timesteps
         self.schedule = schedule
 
@@ -99,8 +96,7 @@ class DDIMSampler(object):
         size = (batch_size, C, H, W)
         print(f'Data shape for DDIM sampling is {size}, eta {eta}')
 
-        if self.ds:
-            samples, intermediates = self.ddim_sampling_ds(conditioning, size,
+        samples, intermediates = self.ddim_sampling(conditioning, size,
                                                     callback=callback,
                                                     img_callback=img_callback,
                                                     quantize_denoised=quantize_x0,
@@ -115,22 +111,6 @@ class DDIMSampler(object):
                                                     unconditional_guidance_scale=unconditional_guidance_scale,
                                                     unconditional_conditioning=unconditional_conditioning,
                                                     )
-        else:
-            samples, intermediates = self.ddim_sampling(conditioning, size,
-                                                        callback=callback,
-                                                        img_callback=img_callback,
-                                                        quantize_denoised=quantize_x0,
-                                                        mask=mask, x0=x0,
-                                                        ddim_use_original_steps=False,
-                                                        noise_dropout=noise_dropout,
-                                                        temperature=temperature,
-                                                        score_corrector=score_corrector,
-                                                        corrector_kwargs=corrector_kwargs,
-                                                        x_T=x_T,
-                                                        log_every_t=log_every_t,
-                                                        unconditional_guidance_scale=unconditional_guidance_scale,
-                                                        unconditional_conditioning=unconditional_conditioning,
-                                                        )
         return samples, intermediates
 
     @torch.no_grad()
@@ -160,6 +140,12 @@ class DDIMSampler(object):
 
         iterator = tqdm(time_range, desc='DDIM Sampler', total=total_steps)
 
+        # weight_dict = self.model.state_dict()
+        # delta_dict = {}
+        # for key in weight_dict.keys():
+        #     if 'act' in key:
+        #         delta_dict[key] = []
+
         for i, step in enumerate(iterator):
             index = total_steps - i - 1
             ts = torch.full((b,), step, device=device, dtype=torch.long)
@@ -175,6 +161,11 @@ class DDIMSampler(object):
                                       corrector_kwargs=corrector_kwargs,
                                       unconditional_guidance_scale=unconditional_guidance_scale,
                                       unconditional_conditioning=unconditional_conditioning)
+            
+            # weight_dict = self.model.state_dict()
+            # for key in delta_dict.keys():
+            #     delta_dict[key].append(weight_dict[key].item())
+
             img, pred_x0 = outs
             if callback: callback(i)
             if img_callback: img_callback(pred_x0, i)
@@ -183,88 +174,20 @@ class DDIMSampler(object):
                 intermediates['x_inter'].append(img.to('cpu'))
                 intermediates['pred_x0'].append(pred_x0.to('cpu'))
                 intermediates['ts'].append(ts.to('cpu'))
-
-        return img, intermediates
-    
-    @torch.no_grad()
-    def ddim_sampling_ds(self, cond, shape,
-                      x_T=None, ddim_use_original_steps=False,
-                      callback=None, timesteps=None, quantize_denoised=False,
-                      mask=None, x0=None, img_callback=None, log_every_t=100,
-                      temperature=1., noise_dropout=0., score_corrector=None, corrector_kwargs=None,
-                      unconditional_guidance_scale=1., unconditional_conditioning=None):
-        device = self.model.betas.device
-        b = shape[0]
-        if x_T is None:
-            img = torch.randn(shape, device=device)
-        else:
-            img = x_T
-
-        if timesteps is None:
-            timesteps = self.ddpm_num_timesteps if ddim_use_original_steps else self.ddim_timesteps
-        elif timesteps is not None and not ddim_use_original_steps:
-            subset_end = int(min(timesteps / self.ddim_timesteps.shape[0], 1) * self.ddim_timesteps.shape[0]) - 1
-            timesteps = self.ddim_timesteps[:subset_end]
-
-        intermediates = {'x_inter': [img.to('cpu')], 'pred_x0': [img.to('cpu')], 'ts': []}
-        time_range = reversed(range(0,timesteps)) if ddim_use_original_steps else np.flip(timesteps)
-        total_steps = timesteps if ddim_use_original_steps else timesteps.shape[0]
-        print(f"Running DDIM Sampling with {total_steps} timesteps")
-
-        iterator = tqdm(time_range, desc='DDIM Sampler', total=total_steps)
-
-        self.model.model.diffusion_model.set_use_sd(True)
-        self.model_nobias.model.diffusion_model.set_use_sd(True)
-        self.model.model.diffusion_model.reset_sd()
-        self.model_nobias.model.diffusion_model.reset_sd()
-
-        for i, step in enumerate(iterator):
-            index = total_steps - i - 1
-            ts = torch.full((b,), step, device=device, dtype=torch.long)
-
-            if mask is not None:
-                assert x0 is not None
-                img_orig = self.model.q_sample(x0, ts)  # TODO: deterministic forward pass?
-                img = img_orig * mask + (1. - mask) * img
-
-            if i == 0:
-                self.model.model.diffusion_model.set_full_prec(self.warm)
-                outs = self.p_sample_ddim(img, cond, ts, index=index, use_original_steps=ddim_use_original_steps,
-                                        quantize_denoised=quantize_denoised, temperature=temperature,
-                                        noise_dropout=noise_dropout, score_corrector=score_corrector,
-                                        corrector_kwargs=corrector_kwargs,
-                                        unconditional_guidance_scale=unconditional_guidance_scale,
-                                        unconditional_conditioning=unconditional_conditioning, model_nobias=False)
-                self.model_nobias.model.diffusion_model.copy_sd(self.model.model.diffusion_model)
-            else:
-                outs = self.p_sample_ddim(img, cond, ts, index=index, use_original_steps=ddim_use_original_steps,
-                                        quantize_denoised=quantize_denoised, temperature=temperature,
-                                        noise_dropout=noise_dropout, score_corrector=score_corrector,
-                                        corrector_kwargs=corrector_kwargs,
-                                        unconditional_guidance_scale=unconditional_guidance_scale,
-                                        unconditional_conditioning=unconditional_conditioning, model_nobias=True)
-            img, pred_x0 = outs
-            if callback: callback(i)
-            if img_callback: img_callback(pred_x0, i)
-
-            if index % log_every_t == 0 or index == total_steps - 1:
-                intermediates['x_inter'].append(img.to('cpu'))
-                intermediates['pred_x0'].append(pred_x0.to('cpu'))
-                intermediates['ts'].append(ts.to('cpu'))
+        
+        # import ipdb
+        # ipdb.set_trace()
 
         return img, intermediates
 
     @torch.no_grad()
     def p_sample_ddim(self, x, c, t, index, repeat_noise=False, use_original_steps=False, quantize_denoised=False,
                       temperature=1., noise_dropout=0., score_corrector=None, corrector_kwargs=None,
-                      unconditional_guidance_scale=1., unconditional_conditioning=None, model_nobias=False):
+                      unconditional_guidance_scale=1., unconditional_conditioning=None):
         b, *_, device = *x.shape, x.device
 
         if unconditional_conditioning is None or unconditional_guidance_scale == 1.:
-            if model_nobias:
-                e_t = self.model_nobias.apply_model(x, t, c)
-            else:
-                e_t = self.model.apply_model(x, t, c)
+            e_t = self.model.apply_model(x, t, c)
         else:
             x_in = torch.cat([x] * 2)
             t_in = torch.cat([t] * 2)
@@ -281,18 +204,12 @@ class DDIMSampler(object):
                         c_in[k] = torch.cat([unconditional_conditioning[k], c[k]])
             else:
                 c_in = torch.cat([unconditional_conditioning, c])
-            if model_nobias:
-                e_t_uncond, e_t = self.model_nobias.apply_model(x_in, t_in, c_in).chunk(2)
-            else:
-                e_t_uncond, e_t = self.model.apply_model(x_in, t_in, c_in).chunk(2)
+            e_t_uncond, e_t = self.model.apply_model(x_in, t_in, c_in).chunk(2)
             e_t = e_t_uncond + unconditional_guidance_scale * (e_t - e_t_uncond)
 
         if score_corrector is not None:
             assert self.model.parameterization == "eps"
-            if model_nobias:
-                e_t = score_corrector.modify_score(self.model_nobias, e_t, x, t, c, **corrector_kwargs)
-            else:
-                e_t = score_corrector.modify_score(self.model, e_t, x, t, c, **corrector_kwargs)
+            e_t = score_corrector.modify_score(self.model, e_t, x, t, c, **corrector_kwargs)
 
         alphas = self.model.alphas_cumprod if use_original_steps else self.ddim_alphas
         alphas_prev = self.model.alphas_cumprod_prev if use_original_steps else self.ddim_alphas_prev

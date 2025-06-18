@@ -4,12 +4,12 @@ channels:
   - nvidia
   - defaults
 dependencies:
-  - python=3.8.17
+  - python=3.8.5
   - pip=20.3
-  - pytorch=2.1.0
-  - pytorch-cuda=11.8 
-  - torchvision=0.16.0
-  - torchaudio=2.1.0
+  - pytorch
+  - pytorch-cuda=11.7 
+  - torchvision
+  - torchaudio
   - numpy
   - pip:
     - albumentations==0.4.3
