@@ -496,6 +496,9 @@ def get_parser():
     parser.add_argument(
         "--config", type=str, required=True, help="Path to the config file"
     )
+    parser.add_argument(
+        "--model_dir", type=str, default=None, help="Path to the model directory"
+    )
     parser.add_argument("--seed", type=int, default=1234, help="Random seed")
     parser.add_argument(
         "-l",
