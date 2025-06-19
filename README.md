@@ -55,7 +55,7 @@ python scripts/sample_diffusion_ldm.py -r <path>/models/ldm/lsun_churches256/mod
  -l <logdir> --generate residual --cali_n 256 --cali_st 20 --cali_data_path cali_data/church.pt 
 ```
 
-You can apply the script to other datasets. In practice, we only generate 256 data for each timestep, which cost several minutes on one H100 GPU. We also provide well-generated calibration data in [Hugging Face](https://huggingface.co/datasets/Weizhi98/MoDiff/tree/main/cali_data)
+You can apply the script to other datasets. In practice, we only generate 256 data for each timestep, which cost several minutes on one H100 GPU. We also provide well-generated calibration data in [Hugging Face](https://huggingface.co/datasets/Weizhi98/MoDiff/tree/main/cali_data).
 
 ### Post-Training Quantization
 1. For dynamic quantization, you do not need the calibration dataset. Reproduce the results of our paper with the following code. You can control the usage of modulated quantization by ` --modulate `, which can allow 3-bit activation as the limit:
@@ -82,7 +82,7 @@ You can apply the script to other datasets. In practice, we only generate 256 da
      --modulate --quant_mode dynamic --act_tensor
 
     ```
-    **Note:** You can enable the tensor wise activation quantization with ` --act_tensor `. For complete text-guided generation results on Stable Diffusion, please download the annotation of [MSCOCO-2014](https://cocodataset.org/#download) and specify `--from-file` augments. You can also download the annotation from [Huggging Face](https://huggingface.co/datasets/Weizhi98/MoDiff/tree/main/annotation/MS-COCO)
+    **Note:** You can enable the tensor wise activation quantization with ` --act_tensor `. For complete text-guided generation results on Stable Diffusion, please download the annotation of [MSCOCO-2014](https://cocodataset.org/#download) and specify `--from-file` augments. You can also download the annotation from [Huggging Face](https://huggingface.co/datasets/Weizhi98/MoDiff/tree/main/annotation/MS-COCO).
 
 2. For Q-Diffusion, please first prepare the calibration dataset following the last step. We recommend to use the min-max initalization, which is both data-efficient and computation-efficient, resulting in comparable results compared to MSE calibration. You can use only 32 calibrated data for each time steps as follows:
     ```
