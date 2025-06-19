@@ -43,11 +43,25 @@ Before the quantization, you need to prepare the pre-trained models with the fol
 4. Our work targets the activation quantization, and you can use the quantized models weight for any quantization. You should download your quantized model weights to ` quant_models ` directory. We use the checkpoints in [Q-Diffusion](https://github.com/Xiuyu-Li/q-diffusion) and you can download those models from [Google Drive](https://drive.google.com/drive/folders/1ImRbmAvzCsU6AOaXbIeI7-4Gu2_Scc-X).
 
 ### Calibration Dataset Generation
-If you use dynamic quantization, you can skip this step. For some quantization methods, calibration dataset is required. We provide scipts to generate calibration dataset for MoDiff as follows:
+If you use dynamic quantization, you can skip this step. For some quantization methods, calibration dataset is required. We provide scipts to generate calibration dataset of CIFAR-10 and LSUN-Churches for MoDiff as follows:
 
-In practice, you only need xxx data, which cost several minites.
+```
+# CIFAR10
+python scripts/sample_diffusion_ddim.py --config configs/cifar10.yml --use_pretrained --timesteps 100 --eta 0 --skip_type quad \
+ --logdir <logdir> --generate residual --cali_n 256 --cali_st 20 --cali_data_path cali_data/cifar10.pt
+
+# LSUN-Churches
+python scripts/sample_diffusion_ldm.py -r <path>/models/ldm/lsun_churches256/model.ckpt --batch_size 32 -c 400 -e 0.0 --seed 42 \
+ -l <logdir> --generate residual --cali_n 256 --cali_st 20 --cali_data_path cali_data/church.pt  
+```
+
+You can apply the script to other datasets. In practice, we only generate 256 data for each timestep, which cost several minutes on one H100 GPU.
 
 ### Post-Training Quantization
+1. For dynamic quantization, you do not need the calibration dataset. Reproduce the results of our paper with the following code:
+    ```
+    
+    ```
 
 ### Image Generation
 
@@ -60,6 +74,6 @@ TBD
 ```
 
 ## Acknowledgements
-Our diffusion model code is developed based on [q-diffusion](https://github.com/Xiuyu-Li/q-diffusion), [ddim](https://github.com/ermongroup/ddim), [latent-diffusion](https://github.com/CompVis/latent-diffusion), and [stable-diffusion](https://github.com/CompVis/latent-diffusion).
+Our diffusion model code is developed based on [q-diffusion](https://github.com/Xiuyu-Li/q-diffusion), [ddim](https://github.com/ermongroup/ddim), [latent-diffusion](https://github.com/CompVis/latent-diffusion), and [stable-diffusion](https://github.com/CompVis/latent-diffusion). If you find any bugs in this repo, feel free to contact my through email or put them in [Issues](https://github.com/WeizhiGao/MoDiff/issues).
 
 We thank [DeepSpeed](https://github.com/microsoft/DeepSpeed) for model sizes and BOPS measurements, and [torch-fidelity](https://github.com/toshas/torch-fidelity) and [guided-diffusion](https://github.com/openai/guided-diffusion) for IS, FID and sFID evaluation.

@@ -117,7 +117,7 @@ class Diffusion(object):
             name = f"lsun_{self.config.data.category}"
         else:
             raise ValueError
-        ckpt = get_ckpt_path(f"ema_{name}", root='/ocean/projects/cis240105p/wgao23/qdiff/models')
+        ckpt = get_ckpt_path(f"ema_{name}", root=self.args.model_dir)
         logger.info("Loading checkpoint {}".format(ckpt))
         model.load_state_dict(torch.load(ckpt, map_location=self.device, weights_only=True))
         
@@ -136,7 +136,7 @@ class Diffusion(object):
                 generated_data = {"xs":xs, "ts":ts}
             else:
                 raise ValueError
-            torch.save(generated_data, os.path.join('/ocean/projects/cis240105p/wgao23/modiff/cali_data/cifar10/cali_data.pt'))
+            torch.save(generated_data, self.args.cali_data_path)
             exit()
 
         if self.args.ptq:
@@ -220,13 +220,6 @@ class Diffusion(object):
                             else:
                                 logger.info('Reconstruction for layer {}'.format(name))
                                 layer_reconstruction_modiff(qnn, module, **kwargs)
-                        # elif isinstance(module, BaseQuantBlock):
-                        #     if module.ignore_reconstruction is True:
-                        #         logger.info('Ignore reconstruction of block {}'.format(name))
-                        #         continue
-                        #     else:
-                        #         logger.info('Reconstruction for block {}'.format(name))
-                        #         block_reconstruction(qnn, module, **kwargs)
                         else:
                             recon_model_modiff(module)
 
@@ -242,7 +235,6 @@ class Diffusion(object):
                     qnn.set_quant_state(True, True)
                     with torch.no_grad():
                         inds = np.random.choice(cali_xs.shape[0], 64, replace=False)
-                        # _ = qnn(cali_xs[:64].cuda(), cali_ts[:64].cuda())
                         if args.modulate:
                             qnn.reset_cache()
                             _ = qnn(cali_xs[inds].cuda(), cali_ts[inds].cuda())
@@ -625,8 +617,8 @@ def get_parser():
     # MoDiff parameters
     parser.add_argument("--modulate", action="store_true", help="if apply modulated computing")
     parser.add_argument("--act_tensor", action="store_true", help="use tensor-wise activation quantization")
-    parser.add_argument("--generate", type=str, default=None, choices=[None, "raw", "residual"], help="generate calibration data")
     parser.add_argument("--cali_min_max", action="store_true", help="use min-max of calibration datasets to init scaling")
+    parser.add_argument("--generate", type=str, default=None, choices=[None, "raw", "residual"], help="generate calibration data")
 
     return parser
 

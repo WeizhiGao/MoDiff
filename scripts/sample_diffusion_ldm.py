@@ -419,9 +419,9 @@ def get_parser():
     # MoDiff parameters
     parser.add_argument("--modulate", action="store_true", help="if apply modulated computing")
     parser.add_argument("--act_tensor", action="store_true", help="use tensor-wise activation quantization")
-    parser.add_argument("--generate", type=str, default=None, choices=[None, "raw", "residual"], help="generate calibration data")
     parser.add_argument("--out_penalty", type=float, default=0.0, help="penalty for outliers in calibration")
     parser.add_argument("--cali_min_max", action="store_true", help="use min-max of calibration datasets to init scaling")
+    parser.add_argument("--generate", type=str, default=None, choices=[None, "raw", "residual"], help="generate calibration data")
 
     return parser
 
@@ -680,10 +680,6 @@ if __name__ == "__main__":
             torch.save(qnn.state_dict(), os.path.join(logdir, "ckpt.pth"))         
 
         model.model.diffusion_model = qnn
-
-        # for name, module in qnn.named_modules():
-        #     if name == 'model.output_blocks.2.0.emb_layers.1.act_quantizer':
-        #         module.print_info = True
 
     # write config out
     sampling_file = os.path.join(logdir, "sampling_config.yaml")
