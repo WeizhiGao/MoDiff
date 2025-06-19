@@ -60,7 +60,7 @@ You can apply the script to other datasets. In practice, we only generate 256 da
 ### Post-Training Quantization
 1. For dynamic quantization, you do not need the calibration dataset. Reproduce the results of our paper with the following code:
     ```
-    
+    1
     ```
 
 ### Image Generation
