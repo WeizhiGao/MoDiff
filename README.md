@@ -13,7 +13,7 @@ Diffusion models have emerged as powerful generative models, but their high comp
 
 ![Method illustration](assets/modiff.png)
 
-## Get Started
+## Usage
 
 ### Installation
 Clone the MoDiff repository and create a conda environment ` modiff ` with the following commands:
@@ -34,7 +34,7 @@ Before the quantization, you need to prepare the pre-trained models with the fol
 
 2. For DDIM on CIFAR10, the pre-trained model will be automatically downloaded. You are able to change the saving path in the input args.
 
-3. For Latent Diffusion and Stable Diffusion experiments, we follow the checkpoints in [latent-diffusion](https://github.com/CompVis/latent-diffusion#model-zoo) and [stable-diffusion](https://github.com/CompVis/stable-diffusion#weights) . We use ` LDM-8 ` for LSUN-Churches, ` LDM-4 ` for LSUN-Bedrooms, and ` sd-v1-1.4 ` for MS-COCO. We provide a script for automatically download:
+3. For Latent Diffusion and Stable Diffusion experiments, we follow the checkpoints in [latent-diffusion](https://github.com/CompVis/latent-diffusion#model-zoo) and [stable-diffusion](https://github.com/CompVis/stable-diffusion#weights) . We use ` LDM-8 ` for LSUN-Churches, ` LDM-4 ` for LSUN-Bedrooms, and ` sd-v1-1.4 ` for MS-COCO. We provide a script for automatically downloading:
     ```
     cd <model_path>/models
     sh download.sh
