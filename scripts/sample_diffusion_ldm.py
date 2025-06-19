@@ -611,9 +611,6 @@ if __name__ == "__main__":
                         recon_model(module)
 
             def recon_model_modiff(model):
-                """
-                Block reconstruction. For the first and last layers, we can only apply layer reconstruction.
-                """
                 for name, module in model.named_children():
                     logger.info(f"{name} {isinstance(module, BaseQuantBlock)}")
                     if isinstance(module, QuantModule):

@@ -257,7 +257,7 @@ def main():
     )
     parser.add_argument(
         "--quant_mode", type=str, default="symmetric", 
-        choices=["linear", "squant", "qdiff"], 
+        choices=["linear", "squant", "qdiff", "dynamic"], 
         help="quantization mode to use"
     )
 
@@ -328,7 +328,15 @@ def main():
         "--verbose", action="store_true",
         help="print out info like quantized model arch"
     )
+
+    # MoDiff parameters
+    parser.add_argument("--modulate", action="store_true", help="if apply modulated computing")
+    parser.add_argument("--act_tensor", action="store_true", help="use tensor-wise activation quantization")
     opt = parser.parse_args()
+
+    if opt.modulate:
+        assert opt.quant_mode == "dynamic"
+        # currently only support dynamic mode
 
     if opt.laion400m:
         print("Falling back to LAION 400M model...")
@@ -338,9 +346,9 @@ def main():
 
     seed_everything(opt.seed)
 
-    os.makedirs(opt.outdir, exist_ok=True)
-    outpath = os.path.join(opt.outdir, datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S"))
-    os.makedirs(outpath)
+    if not os.path.exists(opt.outdir):
+        os.makedirs(opt.outdir, exist_ok=True)
+    outpath = opt.outdir
 
     log_path = os.path.join(outpath, "run.log")
     logging.basicConfig(
@@ -369,125 +377,127 @@ def main():
     if opt.ptq:
         if opt.split:
             setattr(sampler.model.model.diffusion_model, "split", True)
-        if opt.quant_mode == 'qdiff':
-            wq_params = {'n_bits': opt.weight_bit, 'channel_wise': True, 'scale_method': 'mse'}
-            aq_params = {'n_bits': opt.act_bit, 'channel_wise': False, 'scale_method': 'mse', 'leaf_param':  opt.quant_act}
-            if opt.resume:
-                logger.info('Load with min-max quick initialization')
-                wq_params['scale_method'] = 'max'
-                aq_params['scale_method'] = 'max'
+        wq_params = {'n_bits': opt.weight_bit, 'channel_wise': True, 'scale_method': 'mse'}
+        aq_params = {'n_bits': opt.act_bit, 'channel_wise': opt.act_tensor, 'scale_method': 'mse', 
+        'leaf_param':  opt.quant_act, 'dynamic': (opt.quant_mode=="dynamic")}
+        if opt.resume:
+            logger.info('Load with min-max quick initialization')
+            wq_params['scale_method'] = 'max'
+            aq_params['scale_method'] = 'max'
+        if opt.resume_w:
+            wq_params['scale_method'] = 'max'
+        qnn = QuantModel(
+            model=sampler.model.model.diffusion_model, weight_quant_params=wq_params, act_quant_params=aq_params,
+            sm_abit=opt.sm_abit, modulate=opt.modulate)
+        qnn.cuda()
+        qnn.eval()
+        # logging.info(qnn)
+
+        if opt.no_grad_ckpt:
+            logger.info('Not use gradient checkpointing for transformer blocks')
+            qnn.set_grad_ckpt(False)
+
+        if opt.resume:
+            cali_data = (torch.randn(1, 4, 64, 64), torch.randint(0, 1000, (1,)), torch.randn(1, 77, 768))
+            resume_cali_model(qnn, opt.cali_ckpt, cali_data, opt.quant_act, opt.quant_mode, cond=opt.cond)
+        else:
+            logger.info(f"Sampling data from {opt.cali_st} timesteps for calibration")
+            sample_data = torch.load(opt.cali_data_path, weights_only=True)
+            cali_data = get_train_samples(opt, sample_data, opt.ddim_steps)
+            del(sample_data)
+            gc.collect()
+            logger.info(f"Calibration data shape: {cali_data[0].shape} {cali_data[1].shape} {cali_data[2].shape}")
+
+            cali_xs, cali_ts, cali_cs = cali_data
             if opt.resume_w:
-                wq_params['scale_method'] = 'max'
-            qnn = QuantModel(
-                model=sampler.model.model.diffusion_model, weight_quant_params=wq_params, act_quant_params=aq_params,
-                act_quant_mode="qdiff", sm_abit=opt.sm_abit)
-            qnn.cuda()
-            qnn.eval()
-            # logging.info(qnn)
-
-            if opt.no_grad_ckpt:
-                logger.info('Not use gradient checkpointing for transformer blocks')
-                qnn.set_grad_ckpt(False)
-
-            if opt.resume:
-                cali_data = (torch.randn(1, 4, 64, 64), torch.randint(0, 1000, (1,)), torch.randn(1, 77, 768))
-                resume_cali_model(qnn, opt.cali_ckpt, cali_data, opt.quant_act, "qdiff", cond=opt.cond)
+                resume_cali_model(qnn, opt.cali_ckpt, cali_data, False, cond=opt.cond)
             else:
-                logger.info(f"Sampling data from {opt.cali_st} timesteps for calibration")
-                sample_data = torch.load(opt.cali_data_path)
-                cali_data = get_train_samples(opt, sample_data, opt.ddim_steps)
-                del(sample_data)
-                gc.collect()
-                logger.info(f"Calibration data shape: {cali_data[0].shape} {cali_data[1].shape} {cali_data[2].shape}")
-
-                cali_xs, cali_ts, cali_cs = cali_data
-                if opt.resume_w:
-                    resume_cali_model(qnn, opt.cali_ckpt, cali_data, False, cond=opt.cond)
-                else:
-                    logger.info("Initializing weight quantization parameters")
-                    qnn.set_quant_state(True, False) # enable weight quantization, disable act quantization
-                    _ = qnn(cali_xs[:8].cuda(), cali_ts[:8].cuda(), cali_cs[:8].cuda())
-                    logger.info("Initializing has done!") 
-                # Kwargs for weight rounding calibration
-                kwargs = dict(cali_data=cali_data, batch_size=opt.cali_batch_size, 
-                            iters=opt.cali_iters, weight=0.01, asym=True, b_range=(20, 2),
-                            warmup=0.2, act_quant=False, opt_mode='mse', cond=opt.cond)
-                
-                def recon_model(model):
-                    """
-                    Block reconstruction. For the first and last layers, we can only apply layer reconstruction.
-                    """
-                    for name, module in model.named_children():
-                        logger.info(f"{name} {isinstance(module, BaseQuantBlock)}")
-                        if name == 'output_blocks':
-                            logger.info("Finished calibrating input and mid blocks, saving temporary checkpoint...")
-                            in_recon_done = True
-                            torch.save(qnn.state_dict(), os.path.join(outpath, "ckpt.pth"))
-                        if name.isdigit() and int(name) >= 9:
-                            logger.info(f"Saving temporary checkpoint at {name}...")
-                            torch.save(qnn.state_dict(), os.path.join(outpath, "ckpt.pth"))
-                            
-                        if isinstance(module, QuantModule):
-                            if module.ignore_reconstruction is True:
-                                logger.info('Ignore reconstruction of layer {}'.format(name))
-                                continue
-                            else:
-                                logger.info('Reconstruction for layer {}'.format(name))
-                                layer_reconstruction(qnn, module, **kwargs)
-                        elif isinstance(module, BaseQuantBlock):
-                            if module.ignore_reconstruction is True:
-                                logger.info('Ignore reconstruction of block {}'.format(name))
-                                continue
-                            else:
-                                logger.info('Reconstruction for block {}'.format(name))
-                                block_reconstruction(qnn, module, **kwargs)
+                logger.info("Initializing weight quantization parameters")
+                qnn.set_quant_state(True, False) # enable weight quantization, disable act quantization
+                _ = qnn(cali_xs[:8].cuda(), cali_ts[:8].cuda(), cali_cs[:8].cuda())
+                logger.info("Initializing has done!") 
+            # Kwargs for weight rounding calibration
+            kwargs = dict(cali_data=cali_data, batch_size=opt.cali_batch_size, 
+                        iters=opt.cali_iters, weight=0.01, asym=True, b_range=(20, 2),
+                        warmup=0.2, act_quant=False, opt_mode='mse', cond=opt.cond)
+            
+            def recon_model(model):
+                """
+                Block reconstruction. For the first and last layers, we can only apply layer reconstruction.
+                """
+                for name, module in model.named_children():
+                    logger.info(f"{name} {isinstance(module, BaseQuantBlock)}")
+                    if name == 'output_blocks':
+                        logger.info("Finished calibrating input and mid blocks, saving temporary checkpoint...")
+                        in_recon_done = True
+                        torch.save(qnn.state_dict(), os.path.join(outpath, "ckpt.pth"))
+                    if name.isdigit() and int(name) >= 9:
+                        logger.info(f"Saving temporary checkpoint at {name}...")
+                        torch.save(qnn.state_dict(), os.path.join(outpath, "ckpt.pth"))
+                        
+                    if isinstance(module, QuantModule):
+                        if module.ignore_reconstruction is True:
+                            logger.info('Ignore reconstruction of layer {}'.format(name))
+                            continue
                         else:
-                            recon_model(module)
+                            logger.info('Reconstruction for layer {}'.format(name))
+                            layer_reconstruction(qnn, module, **kwargs)
+                    elif isinstance(module, BaseQuantBlock):
+                        if module.ignore_reconstruction is True:
+                            logger.info('Ignore reconstruction of block {}'.format(name))
+                            continue
+                        else:
+                            logger.info('Reconstruction for block {}'.format(name))
+                            block_reconstruction(qnn, module, **kwargs)
+                    else:
+                        recon_model(module)
 
-                if not opt.resume_w:
-                    logger.info("Doing weight calibration")
-                    recon_model(qnn)
-                    qnn.set_quant_state(weight_quant=True, act_quant=False)
-                if opt.quant_act:
-                    logger.info("UNet model")
-                    logger.info(model.model)                    
-                    logger.info("Doing activation calibration")
-                    # Initialize activation quantization parameters
-                    qnn.set_quant_state(True, True)
-                    with torch.no_grad():
-                        inds = np.random.choice(cali_xs.shape[0], 16, replace=False)
-                        _ = qnn(cali_xs[inds].cuda(), cali_ts[inds].cuda(), cali_cs[inds].cuda())
-                        if opt.running_stat:
-                            logger.info('Running stat for activation quantization')
-                            inds = np.arange(cali_xs.shape[0])
-                            np.random.shuffle(inds)
-                            qnn.set_running_stat(True, opt.rs_sm_only)
-                            for i in trange(int(cali_xs.size(0) / 16)):
-                                _ = qnn(cali_xs[inds[i * 16:(i + 1) * 16]].cuda(), 
-                                    cali_ts[inds[i * 16:(i + 1) * 16]].cuda(),
-                                    cali_cs[inds[i * 16:(i + 1) * 16]].cuda())
-                            qnn.set_running_stat(False, opt.rs_sm_only)
+            if not opt.resume_w:
+                logger.info("Doing weight calibration")
+                recon_model(qnn)
+                qnn.set_quant_state(weight_quant=True, act_quant=False)
+            if opt.quant_act:
+                logger.info("UNet model")
+                logger.info(model.model)                    
+                logger.info("Doing activation calibration")
+                # Initialize activation quantization parameters
+                qnn.set_quant_state(True, True)
+                with torch.no_grad():
+                    inds = np.random.choice(cali_xs.shape[0], 16, replace=False)
+                    _ = qnn(cali_xs[inds].cuda(), cali_ts[inds].cuda(), cali_cs[inds].cuda())
+                    if opt.running_stat:
+                        logger.info('Running stat for activation quantization')
+                        inds = np.arange(cali_xs.shape[0])
+                        np.random.shuffle(inds)
+                        qnn.set_running_stat(True, opt.rs_sm_only)
+                        for i in trange(int(cali_xs.size(0) / 16)):
+                            _ = qnn(cali_xs[inds[i * 16:(i + 1) * 16]].cuda(), 
+                                cali_ts[inds[i * 16:(i + 1) * 16]].cuda(),
+                                cali_cs[inds[i * 16:(i + 1) * 16]].cuda())
+                        qnn.set_running_stat(False, opt.rs_sm_only)
 
-                    kwargs = dict(
-                        cali_data=cali_data, batch_size=opt.cali_batch_size, iters=opt.cali_iters_a, act_quant=True, 
-                        opt_mode='mse', lr=opt.cali_lr, p=opt.cali_p, cond=opt.cond)
-                    recon_model(qnn)
-                    qnn.set_quant_state(weight_quant=True, act_quant=True)
-                
-                logger.info("Saving calibrated quantized UNet model")
-                for m in qnn.model.modules():
-                    if isinstance(m, AdaRoundQuantizer):
-                        m.zero_point = nn.Parameter(m.zero_point)
-                        m.delta = nn.Parameter(m.delta)
-                    elif isinstance(m, UniformAffineQuantizer) and opt.quant_act:
-                        if m.zero_point is not None:
-                            if not torch.is_tensor(m.zero_point):
-                                m.zero_point = nn.Parameter(torch.tensor(float(m.zero_point)))
-                            else:
-                                m.zero_point = nn.Parameter(m.zero_point)
-                torch.save(qnn.state_dict(), os.path.join(outpath, "ckpt.pth"))
+                kwargs = dict(
+                    cali_data=cali_data, batch_size=opt.cali_batch_size, iters=opt.cali_iters_a, act_quant=True, 
+                    opt_mode='mse', lr=opt.cali_lr, p=opt.cali_p, cond=opt.cond)
+                recon_model(qnn)
+                qnn.set_quant_state(weight_quant=True, act_quant=True)
+            
+            logger.info("Saving calibrated quantized UNet model")
+            for m in qnn.model.modules():
+                if isinstance(m, AdaRoundQuantizer):
+                    m.zero_point = nn.Parameter(m.zero_point)
+                    m.delta = nn.Parameter(m.delta)
+                elif isinstance(m, UniformAffineQuantizer) and opt.quant_act:
+                    if m.zero_point is not None:
+                        if not torch.is_tensor(m.zero_point):
+                            m.zero_point = nn.Parameter(torch.tensor(float(m.zero_point)))
+                        else:
+                            m.zero_point = nn.Parameter(m.zero_point)
+            torch.save(qnn.state_dict(), os.path.join(outpath, "ckpt.pth"))
 
-            sampler.model.model.diffusion_model = qnn
+        sampler.model.model.diffusion_model = qnn
+
+    sampler.model.model.diffusion_model.reset_cache()
 
     logging.info("Creating invisible watermark encoder (see https://github.com/ShieldMnt/invisible-watermark)...")
     wm = "StableDiffusionV1"
@@ -508,7 +518,8 @@ def main():
             data = list(chunk(data, batch_size))
 
     sample_path = os.path.join(outpath, "samples")
-    os.makedirs(sample_path, exist_ok=True)
+    if not os.path.exists(sample_path):
+        os.makedirs(sample_path, exist_ok=True)
     base_count = len(os.listdir(sample_path))
     grid_count = len(os.listdir(outpath)) - 1
 
@@ -540,6 +551,10 @@ def main():
                             prompts = list(prompts)
                         c = model.get_learned_conditioning(prompts)
                         shape = [opt.C, opt.H // opt.f, opt.W // opt.f]
+
+                        if opt.modulate:
+                            sampler.model.model.diffusion_model.reset_cache()
+
                         samples_ddim, _ = sampler.sample(S=opt.ddim_steps,
                                                          conditioning=c,
                                                          batch_size=opt.n_samples,

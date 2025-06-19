@@ -592,6 +592,7 @@ def resume_cali_model(qnn, ckpt_path, cali_data, quant_act=False, act_quant_mode
             _ = qnn(cali_xs[:1].cuda(), cali_ts[:1].cuda())
         else:
             _ = qnn(cali_xs[:1].cuda(), cali_ts[:1].cuda(), cali_cs[:1].cuda())
+            _ = qnn(cali_xs[:1].cuda(), cali_ts[:1].cuda(), cali_cs[:1].cuda())
         print("Loading quantized model checkpoint again")
         
         for m in qnn.model.modules():
@@ -607,9 +608,6 @@ def resume_cali_model(qnn, ckpt_path, cali_data, quant_act=False, act_quant_mode
                     
         if act_quant_mode == "qdiff":
             ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=True)
-            # keys = [key for key in ckpt.keys() if "attention" in key]
-            # for key in keys:
-            #     del ckpt[key]
             qnn.load_state_dict(ckpt)
         qnn.set_quant_state(weight_quant=True, act_quant=True)
         
@@ -628,8 +626,3 @@ def resume_cali_model(qnn, ckpt_path, cali_data, quant_act=False, act_quant_mode
                     delattr(m, "zero_point")
                     assert(int(zero_data) == zero_data)
                     m.zero_point = int(zero_data)
-
-    # for key, value in qnn.state_dict().items():
-    #     if 'act' in key:
-    #         logging.info(key + ': ' + str(value.item()))
-    # exit()

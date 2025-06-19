@@ -108,7 +108,7 @@ You can apply the script to other datasets. In practice, we only generate 256 da
      --cali_data_path $path/cali_data/church.pt -l logdir> --cali_ckpt $path/quantized_models/church_w4a8_ckpt.pth --resume_w \
      --modulate --quant_mode qdiff -n 50000
     ```
-    **Note:** You can tune the calibration learning rate and the outlier penalty with `cali_lr` and `out_penalty` for better generation quality.
+    **Note:** You can tune the calibration learning rate and the outlier penalty with `--cali_lr` and `--out_penalty` for better generation quality.
 
 ### Image Generation
 

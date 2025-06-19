@@ -196,9 +196,7 @@ def cross_attn_forward(self, x, context=None, mask=None):
     q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> (b h) n d', h=h), (q, k, v))
 
     if self.use_act_quant:
-        quant_q = self.act_quantizer_q(q)
-        quant_k = self.act_quantizer_k(k)
-        sim = einsum('b i d, b j d -> b i j', quant_q, quant_k) * self.scale
+        sim = einsum('b i d, b j d -> b i j', q, k) * self.scale
     else:
         sim = einsum('b i d, b j d -> b i j', q, k) * self.scale
 
@@ -212,7 +210,7 @@ def cross_attn_forward(self, x, context=None, mask=None):
     attn = sim.softmax(dim=-1)
 
     if self.use_act_quant:
-        out = einsum('b i j, b j d -> b i d', self.act_quantizer_w(attn), self.act_quantizer_v(v))
+        out = einsum('b i j, b j d -> b i d', attn, v)
     else:
         out = einsum('b i j, b j d -> b i d', attn, v)
     out = rearrange(out, '(b h) n d -> b n (h d)', h=h)
