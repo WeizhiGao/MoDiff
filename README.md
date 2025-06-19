@@ -48,11 +48,11 @@ If you use dynamic quantization, you can skip this step. For some quantization m
 ```
 # CIFAR10
 python scripts/sample_diffusion_ddim.py --config configs/cifar10.yml --use_pretrained --timesteps 100 --eta 0 --skip_type quad \
- --logdir <logdir> --generate residual --cali_n 256 --cali_st 20 --cali_data_path cali_data/cifar10.pt
+ --logdir <logdir> --generate residual --cali_n 256 --cali_st 20 --cali_data_path cali_data/cifar10.pt 
 
 # LSUN-Churches
 python scripts/sample_diffusion_ldm.py -r <path>/models/ldm/lsun_churches256/model.ckpt --batch_size 32 -c 400 -e 0.0 --seed 42 \
- -l <logdir> --generate residual --cali_n 256 --cali_st 20 --cali_data_path cali_data/church.pt  
+ -l <logdir> --generate residual --cali_n 256 --cali_st 20 --cali_data_path cali_data/church.pt 
 ```
 
 You can apply the script to other datasets. In practice, we only generate 256 data for each timestep, which cost several minutes on one H100 GPU.
@@ -60,8 +60,55 @@ You can apply the script to other datasets. In practice, we only generate 256 da
 ### Post-Training Quantization
 1. For dynamic quantization, you do not need the calibration dataset. Reproduce the results of our paper with the following code:
     ```
-    1
+    # CIFAR10
+    python scripts/sample_diffusion_ddim.py --config configs/cifar10.yml --use_pretrained --timesteps 100 --eta 0 --skip_type quad --ptq \
+     --weight_bit 4 --quant_act --act_bit 4 --a_sym --split --resume -l <logdir> --cali_ckpt $path/quant_models/cifar_w4a8_ckpt.pth \
+     --modulate --quant_mode dynamic --max_images 50000
+
+    # LSUN-Churches
+    python scripts/sample_diffusion_ldm.py -r $path/models/ldm/lsun_churches256/model.ckpt --batch_size 8 -c 400 -e 0.0 --seed 41 --ptq \
+     --weight_bit 4 --quant_act --act_bit 4 --resume -l <logdir> --cali_ckpt $path/quant_models/church_w4a8_ckpt.pth \
+     --modulate --quant_mode dynamic -n 50000
+
+    # LSUN-Bedrooms
+    python scripts/sample_diffusion_ldm.py -r $path/models/ldm/lsun_beds256/model.ckpt --batch_size 8 -c 200 -e 0.0 --seed 41 --ptq \
+     --weight_bit 4 --quant_act --act_bit 4 --resume -l <logdir> --cali_ckpt $path/quant_models/bedroom_w4a8_ckpt.pth \
+     --modulate --quant_mode dynamic -n 50000
+
+    # Text-Guided with Stable Diffusion
     ```
+    **Note:** You can enable the tensor wise activation quantization with ` --act_tensor `.
+
+2. For Q-Diffusion, please first prepare the calibration dataset following the last step. We recommend to use the min-max initalization, which is both data-efficient and computation-efficient, resulting in comparable results compared to MSE calibration. You can use only 32 calibrated data for each time steps as follows:
+    ```
+    # CIFAR10
+    python scripts/sample_diffusion_ddim.py --config configs/cifar10.yml --use_pretrained --timesteps 100 --eta 0 --skip_type quad --ptq \
+     --weight_bit 4 --cali_st 20 --cali_batch_size 32 --cali_n 32 --quant_act --act_bit 4 --a_sym --split \
+     --cali_data_path $path/cali_data/cifar10.pt -l <logdir> --cali_ckpt $path/quant_models/cifar_w4a8_ckpt.pth --resume_w \
+     --modulate --quant_mode qdiff --cali_min_max --max_image 50000
+
+    # LSUN-Churches
+    python scripts/sample_diffusion_ldm.py -r $path/models/ldm/lsun_churches256/model.ckpt --batch_size 8 -c 400 -e 0.0 --seed 42 \
+     --ptq --weight_bit 4 --cali_st 20 --cali_batch_size 32 --cali_n 32 --quant_act --act_bit 4 \
+     --cali_data_path $path/cali_data/church.pt -l <logdir> --cali_ckpt $path/quantized_models/church_w4a8_ckpt.pth --resume_w \
+     --modulate --quant_mode qdiff --cali_min_max -n 50000
+    ```
+
+3. For MSE calibration of Q-Diffusion, you can reproduce with the following code:
+    ```
+    # CIFAR10
+    python scripts/sample_diffusion_ddim.py --config configs/cifar10.yml --use_pretrained --timesteps 100 --eta 0 --skip_type quad --ptq \
+     --weight_bit 4 --cali_st 20 --cali_batch_size 32 --cali_n 256 --quant_act --act_bit 4 --a_sym --split \
+     --cali_data_path $path/cali_data/cifar10.pt  -l <logdir> --cali_ckpt $path/quant_models/cifar_w4a8_ckpt.pth --resume_w \
+     --modulate --quant_mode qdiff --max_image 50000
+
+    # LSUN-Churches
+    python scripts/sample_diffusion_ldm.py -r $path/models/ldm/lsun_churches256/model.ckpt --batch_size 8 -c 400 -e 0.0 --seed 42 \
+     --ptq --weight_bit 4 --cali_st 20 --cali_batch_size 32 --cali_n 256 --quant_act --act_bit 4 \
+     --cali_data_path $path/cali_data/church.pt -l logdir> --cali_ckpt $path/quantized_models/church_w4a8_ckpt.pth --resume_w \
+     --modulate --quant_mode qdiff -n 50000
+    ```
+    **Note:** You can tune the calibration learning rate and the outlier penalty with `cali_lr` and `out_penalty` for better generation quality.
 
 ### Image Generation
 

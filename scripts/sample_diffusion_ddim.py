@@ -128,11 +128,11 @@ class Diffusion(object):
         if self.args.generate is not None:
             if self.args.generate == 'residual':
                 xs, ts, xs_prev, ts_prev = self.generate(model)
-                print(xs.size(), ts.size(), xs_prev.size(), ts_prev.size())
+                logging.info(f"xs size: {xs.size()}, ts size: {ts.size()}, xs_prev size: {xs_prev.size()}, ts_prev size: {ts_prev.size()}")
                 generated_data = {"xs":xs, "ts":ts, "xs_prev":xs_prev, "ts_prev":ts_prev}
             elif self.args.generate == 'raw':
                 xs, ts = self.generate(model)
-                print(xs.size(), ts.size())
+                logging.info(f"xs size: {xs.size()}, ts size: {ts.size()}")
                 generated_data = {"xs":xs, "ts":ts}
             else:
                 raise ValueError
@@ -141,7 +141,9 @@ class Diffusion(object):
 
         if self.args.ptq:
             wq_params = {'n_bits': args.weight_bit, 'channel_wise': True, 'scale_method': 'max'}
-            aq_params = {'n_bits': args.act_bit, 'symmetric': args.a_sym, 'channel_wise': args.act_tensor, 'scale_method': 'max', 'leaf_param': args.quant_act, 'dynamic': (args.quant_mode=="dynamic")}
+            aq_params = {
+                'n_bits': args.act_bit, 'symmetric': args.a_sym, 'channel_wise': args.act_tensor, 'scale_method': 'max', 
+                'leaf_param': args.quant_act, 'dynamic': (args.quant_mode=="dynamic")}
             if self.args.resume:
                 logger.info('Load with min-max quick initialization')
                 wq_params['scale_method'] = 'max'
@@ -251,7 +253,7 @@ class Diffusion(object):
                     
                     kwargs = dict(
                         cali_data=cali_data, iters=self.args.cali_iters_a, act_quant=True, 
-                        opt_mode='mse', lr=self.args.cali_lr, p=self.args.cali_p)   
+                        opt_mode='mse', lr=self.args.cali_lr, p=self.args.cali_p, min_max=self.args.cali_min_max, out_penalty=self.args.out_penalty)   
                     if args.modulate:
                         recon_model_modiff(qnn)
                     else:
@@ -617,6 +619,7 @@ def get_parser():
     # MoDiff parameters
     parser.add_argument("--modulate", action="store_true", help="if apply modulated computing")
     parser.add_argument("--act_tensor", action="store_true", help="use tensor-wise activation quantization")
+    parser.add_argument("--out_penalty", type=float, default=0.0, help="penalty for outliers in calibration")
     parser.add_argument("--cali_min_max", action="store_true", help="use min-max of calibration datasets to init scaling")
     parser.add_argument("--generate", type=str, default=None, choices=[None, "raw", "residual"], help="generate calibration data")
 

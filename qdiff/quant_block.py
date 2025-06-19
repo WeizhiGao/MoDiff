@@ -122,11 +122,6 @@ class QuantQKMatMul(BaseQuantBlock):
         
     def forward(self, q, k):
         if self.use_act_quant:
-            # quant_q = self.act_quantizer_q(q * self.scale)
-            # quant_k = self.act_quantizer_k(k * self.scale)
-            # weight = th.einsum(
-            #     "bct,bcs->bts", quant_q, quant_k
-            # ) 
             weight = th.einsum(
                 "bct,bcs->bts", q * self.scale, k * self.scale
             )
@@ -155,7 +150,6 @@ class QuantSMVMatMul(BaseQuantBlock):
     def forward(self, weight, v):
         if self.use_act_quant:
             a = th.einsum("bts,bcs->bct", weight, v)
-            # a = th.einsum("bts,bcs->bct", self.act_quantizer_w(weight), self.act_quantizer_v(v))
         else:
             a = th.einsum("bts,bcs->bct", weight, v)
         return a
@@ -381,8 +375,6 @@ class QuantAttnBlock(BaseQuantBlock):
         w_ = w_.permute(0, 2, 1)   # b,hw,hw (first hw of k, second of q)
         # b, c,hw (hw of q) h_[b,c,j] = sum_i v[b,c,i] w_[b,i,j]
         if self.use_act_quant:
-            # v = self.act_quantizer_v(v)
-            # w_ = self.act_quantizer_w(w_)
             pass
         h_ = th.bmm(v, w_)
         h_ = h_.reshape(b, c, h, w)

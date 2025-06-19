@@ -532,18 +532,17 @@ if __name__ == "__main__":
     if opt.generate is not None:
         if opt.generate == 'residual':
             xs, ts, xs_prev, ts_prev = generate(model, args=opt)
-            print(xs.size(), ts.size(), xs_prev.size(), ts_prev.size())
+            logging.info(f"xs size: {xs.size()}, ts size: {ts.size()}, xs_prev size: {xs_prev.size()}, ts_prev size: {ts_prev.size()}")
             generated_data = {"xs":xs, "ts":ts, "xs_prev":xs_prev, "ts_prev":ts_prev}
         elif opt.generate == 'raw':
             xs, ts = generate(model, args=opt)
-            print(xs.size(), ts.size())
+            logging.info(f"xs size: {xs.size()}, ts size: {ts.size()}")
             generated_data = {"xs":xs, "ts":ts}
         else:
             raise ValueError
         torch.save(generated_data, opt.cali_data_path)
         exit()
 
-    # print(model.model)
     assert(not opt.cond)
     if opt.ptq:
         a_scale_method = 'mse' if not opt.a_min_max else 'max'
@@ -653,9 +652,6 @@ if __name__ == "__main__":
                                 cali_ts[i * 64:(i + 1) * 64].cuda())
                         qnn.set_running_stat(False)
                 
-                # for name, module in qnn.named_modules():
-                #     if isinstance(module, QuantModule):
-                #         logging.info(name + str(module.act_quantizer.delta.item()))
 
                 kwargs = dict(
                     cali_data=cali_data, iters=opt.cali_iters_a, act_quant=True, 

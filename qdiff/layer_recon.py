@@ -183,7 +183,7 @@ def layer_reconstruction_modiff(model: QuantModel, layer: QuantModule, cali_data
         layer.act_quantizer.delta.copy_(delta)
         if layer.split != 0 and layer.act_quantizer_0.delta is not None:
             layer.act_quantizer_0.delta.copy_(delta)
-        logging.info("delta_min_max: " + str(layer.act_quantizer.delta.item()))
+        # logging.info("delta_min_max: " + str(layer.act_quantizer.delta.item()))
     
     if not min_max:
         for i in range(iters):
@@ -211,7 +211,7 @@ def layer_reconstruction_modiff(model: QuantModel, layer: QuantModule, cali_data
 
     torch.cuda.empty_cache()
 
-    logging.info("delta after: " + str(layer.act_quantizer.delta.item()))
+    # logging.info("delta after: " + str(layer.act_quantizer.delta.item()))
 
     # Finish optimization, use hard rounding.
     layer.weight_quantizer.soft_targets = False
