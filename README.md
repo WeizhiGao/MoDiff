@@ -130,9 +130,9 @@ python scripts/sample_diffusion_ldm.py -r $path/models/ldm/lsun_churches256/mode
 ```
 
 ### Evaluation
-For the evaluation of IS, FID, sFID, we folow [torch-fidelity](https://github.com/toshas/torch-fidelity) and [guided-diffusion](https://github.com/openai/guided-diffusion). We generate 50,000 images for CIFAR-10 and LSUN datasets. 
+For the evaluation of IS, FID, sFID, we follow [torch-fidelity](https://github.com/toshas/torch-fidelity) and [guided-diffusion](https://github.com/openai/guided-diffusion). We generate 50,000 images for CIFAR-10 and LSUN datasets. 
 
-1. Evaluate IS and FID scores with torch-fidelity. Before evlautaion, you need to download the reference datasets. The cifar-10 reference data will be downladed automatically, and you can obtain the LSUN datasets  [here](https://github.com/fyu/lsun). Then run the following command to gain the IS score and FID score:
+1. Evaluate IS and FID scores with torch-fidelity. Before evlautaion, you need to download the reference datasets. The cifar-10 reference data will be downladed automatically, and you can obtain the LSUN datasets [here](https://github.com/fyu/lsun). Then run the following command to gain the IS score and FID score:
     
     ```
     # CIFAR10
@@ -155,4 +155,4 @@ TBD
 ## Acknowledgements
 We appreciate the availability of well-maintained public codebases. Our diffusion model code is developed based on [q-diffusion](https://github.com/Xiuyu-Li/q-diffusion), [ddim](https://github.com/ermongroup/ddim), [latent-diffusion](https://github.com/CompVis/latent-diffusion), and [stable-diffusion](https://github.com/CompVis/latent-diffusion). If you find any bugs in this repo, feel free to contact my through email or put them in [Issues](https://github.com/WeizhiGao/MoDiff/issues).
 
-We thank [DeepSpeed](https://github.com/microsoft/DeepSpeed) for model sizes and BOPS measurements, and [torch-fidelity](https://github.com/toshas/torch-fidelity) and [guided-diffusion](https://github.com/openai/guided-diffusion) for IS, FID and sFID evaluation.
+We thank [DeepSpeed](https://github.com/microsoft/DeepSpeed) for model sizes and BOPS measurements, [torch-fidelity](https://github.com/toshas/torch-fidelity) and [guided-diffusion](https://github.com/openai/guided-diffusion) for IS, FID and sFID evaluation, and [LSUN]((https://github.com/fyu/lsun)) for providing datasets. 
