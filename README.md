@@ -1,6 +1,6 @@
 # Modulated Diffusion: Accelerating Generative Modeling with Modulated Quantization
 
-This repository provides the official implementation of our ICML 2025 paper, [Modulated Diffusion: Accelerating Generative Modeling with Modulated Quantization](https://icml.cc/virtual/2025/poster/43551), along with the pretrained checkpoints and the calibrated dataset used for Q-Diffusion. MoDiff is designed to be compatible with any post-training quantization (PTQ) method, enabling lower activation precision (up to 3 bits) without compromising generation quality.
+This repository provides the official implementation of our ICML 2025 paper, [Modulated Diffusion: Accelerating Generative Modeling with Modulated Quantization](https://icml.cc/virtual/2025/poster/43551), along with the pretrained checkpoints and the calibrated dataset used for Q-Diffusion. MoDiff is designed to be compatible with any post-training quantization (PTQ) method, enabling lower activation precision (up to 3 bits) without compromising generation quality. 
 
 ![Example output on LSUN Church dataset](assets/example_church.png)
 
@@ -58,7 +58,7 @@ python scripts/sample_diffusion_ldm.py -r <path>/models/ldm/lsun_churches256/mod
 You can apply the script to other datasets. In practice, we only generate 256 data for each timestep, which cost several minutes on one H100 GPU.
 
 ### Post-Training Quantization
-1. For dynamic quantization, you do not need the calibration dataset. Reproduce the results of our paper with the following code:
+1. For dynamic quantization, you do not need the calibration dataset. Reproduce the results of our paper with the following code. You can control the usage of modulated quantization by ` --modulate `, which can allow 3-bit activation as the limit:
     ```
     # CIFAR10
     python scripts/sample_diffusion_ddim.py --config configs/cifar10.yml --use_pretrained --timesteps 100 --eta 0 --skip_type quad --ptq \
@@ -76,8 +76,13 @@ You can apply the script to other datasets. In practice, we only generate 256 da
      --modulate --quant_mode dynamic -n 50000
 
     # Text-Guided with Stable Diffusion
+    python scripts/txt2img.py --prompt "a photograph of an astronaut riding a horse" --plms --cond --n_iter 1 --n_samples 5 --skip_grid --ptq \
+     --weight_bit 8 --quant_act --act_bit 4 --no_grad_ckpt --split --running_stat --outdir <logdir> \
+     --ckpt $path/models/stable-diffusion-v1/model.ckpt --resume --cali_ckpt $path/quantized_models/sd_w8a8_ckpt.pth \
+     --modulate --quant_mode dynamic --act_tensor
+
     ```
-    **Note:** You can enable the tensor wise activation quantization with ` --act_tensor `.
+    **Note:** You can enable the tensor wise activation quantization with ` --act_tensor `. For complete text-guided generation results on Stable Diffusion, please download the annotation of [MSCOCO-2014](https://cocodataset.org/#download) and specify `--from-file` augments. You can also download the annotation from [Google Drive]()
 
 2. For Q-Diffusion, please first prepare the calibration dataset following the last step. We recommend to use the min-max initalization, which is both data-efficient and computation-efficient, resulting in comparable results compared to MSE calibration. You can use only 32 calibrated data for each time steps as follows:
     ```
@@ -111,16 +116,43 @@ You can apply the script to other datasets. In practice, we only generate 256 da
     **Note:** You can tune the calibration learning rate and the outlier penalty with `--cali_lr` and `--out_penalty` for better generation quality.
 
 ### Image Generation
+You can generate images from the quantized checkpoints. For dynamic quantization, please refer the [Dynamic Quantization](#post-training-quantization). For Q-Diffusion checkpoints, use the following commands to generate images:
+```
+# CIFAR10
+python scripts/sample_diffusion_ddim.py --config configs/cifar10.yml --use_pretrained --timesteps 100 --eta 0 --skip_type quad --ptq \
+ --weight_bit 8 --quant_act --act_bit 4 --a_sym --split --resume -l <logdir> --cali_ckpt <ckpt_dir> \
+ --modulate --quant_mode qdiff --max_images 50000
+
+# LSUN-Churches
+python scripts/sample_diffusion_ldm.py -r $path/models/ldm/lsun_churches256/model.ckpt --batch_size 64 -c 400 -e 0.0 --seed 41 \
+ --ptq --weight_bit 4 --quant_act --act_bit 4 --resume -l <logdir> --cali_ckpt <ckpt_dir> \
+ --modulate --quant_mode qdiff -n 50000 
+```
 
 ### Evaluation
+For the evaluation of IS, FID, sFID, we folow [torch-fidelity](https://github.com/toshas/torch-fidelity) and [guided-diffusion](https://github.com/openai/guided-diffusion). We generate 50,000 images for CIFAR-10 and LSUN datasets. 
+
+1. Evaluate IS and FID scores with torch-fidelity. Before evlautaion, you need to download the reference datasets. The cifar-10 reference data will be downladed automatically, and you can obtain the LSUN datasets  [here](https://github.com/fyu/lsun). Then run the following command to gain the IS score and FID score:
+    
+    ```
+    # CIFAR10
+    fidelity --gpu 0 --isc --fid --input1 <generated_image_path> --input2 cifar10-train
+
+    # LSUN
+    fidelity --gpu 0 --fid --input1 <generated_image_path> --input2 <reference_image_path>
+    ```
+2. Evaluate FID and sFID scores with guided-diffusion. Please follow the [requirements](https://github.com/openai/guided-diffusion/blob/main/evaluations/requirements.txt) to install a TensorFlow-based environment. After installing the environment, you need to compress your reference dataset as `.npz` files. We provided the files of CIFAR10 and LSUN datasets in [Google Drive](). For LSUN generation, it defaultly saves the '.npz' files. For the generated'.npz' file of CIFAR-10, you can collect it during sampling or post process the generated '.png' files. Then run the following command to gain the IS score and FID score:
+    ```
+    python scripts/evaluate.py <reference_npz_file> <generated_npz_file>
+    ```
 
 ## Citation
-If you find this work useful in your usage, please consider citing our paper:
+If you find this work helpful in your usage, please consider citing our paper:
 ```
 TBD
 ```
 
 ## Acknowledgements
-Our diffusion model code is developed based on [q-diffusion](https://github.com/Xiuyu-Li/q-diffusion), [ddim](https://github.com/ermongroup/ddim), [latent-diffusion](https://github.com/CompVis/latent-diffusion), and [stable-diffusion](https://github.com/CompVis/latent-diffusion). If you find any bugs in this repo, feel free to contact my through email or put them in [Issues](https://github.com/WeizhiGao/MoDiff/issues).
+We appreciate the availability of well-maintained public codebases. Our diffusion model code is developed based on [q-diffusion](https://github.com/Xiuyu-Li/q-diffusion), [ddim](https://github.com/ermongroup/ddim), [latent-diffusion](https://github.com/CompVis/latent-diffusion), and [stable-diffusion](https://github.com/CompVis/latent-diffusion). If you find any bugs in this repo, feel free to contact my through email or put them in [Issues](https://github.com/WeizhiGao/MoDiff/issues).
 
 We thank [DeepSpeed](https://github.com/microsoft/DeepSpeed) for model sizes and BOPS measurements, and [torch-fidelity](https://github.com/toshas/torch-fidelity) and [guided-diffusion](https://github.com/openai/guided-diffusion) for IS, FID and sFID evaluation.

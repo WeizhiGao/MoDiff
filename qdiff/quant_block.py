@@ -121,14 +121,10 @@ class QuantQKMatMul(BaseQuantBlock):
         self.act_quantizer_k = UniformAffineQuantizer(**act_quant_params)
         
     def forward(self, q, k):
-        if self.use_act_quant:
-            weight = th.einsum(
-                "bct,bcs->bts", q * self.scale, k * self.scale
-            )
-        else:
-            weight = th.einsum(
-                "bct,bcs->bts", q * self.scale, k * self.scale
-            )
+        weight = th.einsum(
+            "bct,bcs->bts", q * self.scale, k * self.scale
+        )
+
         return weight
 
     def set_quant_state(self, weight_quant: bool = False, act_quant: bool = False):
@@ -148,10 +144,7 @@ class QuantSMVMatMul(BaseQuantBlock):
         self.act_quantizer_w = UniformAffineQuantizer(**act_quant_params_w)
         
     def forward(self, weight, v):
-        if self.use_act_quant:
-            a = th.einsum("bts,bcs->bct", weight, v)
-        else:
-            a = th.einsum("bts,bcs->bct", weight, v)
+        a = th.einsum("bts,bcs->bct", weight, v)
         return a
 
     def set_quant_state(self, weight_quant: bool = False, act_quant: bool = False):
@@ -195,10 +188,7 @@ def cross_attn_forward(self, x, context=None, mask=None):
 
     q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> (b h) n d', h=h), (q, k, v))
 
-    if self.use_act_quant:
-        sim = einsum('b i d, b j d -> b i j', q, k) * self.scale
-    else:
-        sim = einsum('b i d, b j d -> b i j', q, k) * self.scale
+    sim = einsum('b i d, b j d -> b i j', q, k) * self.scale
 
     if exists(mask):
         mask = rearrange(mask, 'b ... -> b (...)')
@@ -209,10 +199,7 @@ def cross_attn_forward(self, x, context=None, mask=None):
     # attention, what we cannot get enough of
     attn = sim.softmax(dim=-1)
 
-    if self.use_act_quant:
-        out = einsum('b i j, b j d -> b i d', attn, v)
-    else:
-        out = einsum('b i j, b j d -> b i d', attn, v)
+    out = einsum('b i j, b j d -> b i d', attn, v)
     out = rearrange(out, '(b h) n d -> b n (h d)', h=h)
     return self.to_out(out)
 
@@ -360,10 +347,7 @@ class QuantAttnBlock(BaseQuantBlock):
         q = q.reshape(b, c, h*w)
         q = q.permute(0, 2, 1)   # b,hw,c
         k = k.reshape(b, c, h*w)  # b,c,hw
-        if self.use_act_quant:
-            # q = self.act_quantizer_q(q)
-            # k = self.act_quantizer_k(k)
-            pass
+
         w_ = th.bmm(q, k)     # b,hw,hw    w[b,i,j]=sum_c q[b,i,c]k[b,c,j]
         w_ = w_ * (int(c)**(-0.5))
         w_ = nn.functional.softmax(w_, dim=2)
@@ -372,8 +356,7 @@ class QuantAttnBlock(BaseQuantBlock):
         v = v.reshape(b, c, h*w)
         w_ = w_.permute(0, 2, 1)   # b,hw,hw (first hw of k, second of q)
         # b, c,hw (hw of q) h_[b,c,j] = sum_i v[b,c,i] w_[b,i,j]
-        if self.use_act_quant:
-            pass
+
         h_ = th.bmm(v, w_)
         h_ = h_.reshape(b, c, h, w)
 
